@@ -20,6 +20,6 @@ pub mod cli;
 pub mod client;
 pub mod model;
 
-pub use client::RobinClient;
+pub use client::Client;
 pub use error::RobinError;
 pub use model::*;

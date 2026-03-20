@@ -1,7 +1,7 @@
 // Binary entry point for robctl
 // Uses the CLI functionality from the batman_robin crate
 
-use batman_robin::RobinClient;
+use batman_robin::Client;
 use batman_robin::cli::*;
 
 /// Handle a `RobinError` in a CLI-friendly way by printing the error and exiting.
@@ -17,7 +17,7 @@ fn exit_on_error<T>(res: Result<T, batman_robin::RobinError>) -> T {
 
 #[tokio::main]
 async fn main() {
-    let client = RobinClient::new();
+    let client = Client::new();
     let matches = app::build_cli().get_matches();
     let mesh_if = matches
         .get_one::<String>("meshif")
