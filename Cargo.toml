@@ -1,6 +1,6 @@
 [package]
 name = "batman-robin"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 description = "Rust library and CLI tool for interacting with the BATMAN-adv kernel module for mesh networking"
 repository = "https://github.com/sntns/robin"
