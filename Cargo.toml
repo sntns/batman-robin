@@ -23,11 +23,17 @@ neli = { version = "0.7", features = ["async"] }
 thiserror = "2.0.17"
 macaddr = "1"
 bitflags = "2"
+validator = "0.20"
+async-trait = "0.1"
+futures = "0.3"
+tokio-stream = "0.1"
+tracing = "0.1"
 
 # CLI dependencies
 clap = { version = "4.5.32", features = ["cargo", "derive", "env"] }
-tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "macros", "time"] }
 comfy-table = "7"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [package.metadata.release]
 # cargo-release configuration

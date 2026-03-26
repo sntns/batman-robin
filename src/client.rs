@@ -1,30 +1,29 @@
+use super::Error;
 use crate::commands;
-use crate::error::RobinError;
 use crate::model;
+use futures::stream::BoxStream;
+use validator::Validate;
 
 /// High-level client for interacting with the BATMAN-adv mesh network.
 ///
-/// `Client` provides async methods to query and manage mesh interfaces,
-/// translation tables, routing algorithms, gateways, and neighbors.
+/// `Client` provides asynchronous methods to query and configure BATMAN-adv
+/// interfaces and settings via netlink.
 ///
-/// All methods return a `Result` containing either the requested data or a `RobinError`.
+/// Mesh-targeted methods take a [`model::MeshSelector`] by value. You can build
+/// selectors explicitly with [`model::MeshSelector::with_name`] or
+/// [`model::MeshSelector::with_ifindex`].
 ///
 /// # Example
 ///
 /// ```no_run
-/// use batman_robin::Client;
-/// # async fn example() -> Result<(), batman_robin::RobinError> {
+/// use batman_robin::{Client, MeshSelector};
+///
+/// # async fn example() -> Result<(), batman_robin::Error> {
 /// let client = Client::new();
-/// let mesh_if = "bat0";
+/// let selector = MeshSelector::with_name("bat0");
 ///
-/// // Get all neighbors
-/// let neighbors = client.neighbors(mesh_if).await?;
-///
-/// // Print active interfaces
-/// let interfaces = client.get_interface(mesh_if).await?;
-/// for iface in interfaces {
-///     println!("{}: {}", iface.ifname, if iface.active { "active" } else { "inactive" });
-/// }
+/// let neighbors = client.neighbors(selector.clone()).await?;
+/// println!("{} neighbor entries", neighbors.len());
 /// # Ok(())
 /// # }
 /// ```
@@ -42,512 +41,699 @@ impl Client {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```no_run
     /// use batman_robin::Client;
+    ///
     /// let client = Client::new();
+    /// let _ = client;
     /// ```
     pub fn new() -> Self {
         Self {}
     }
 
-    /// Converts a network interface name to its corresponding index.
+    /// Resolves a `MeshSelector` into a concrete interface index.
+    ///
+    /// This method validates the selector first, then resolves by `ifindex` directly
+    /// when present or by interface `name` via `if_nametoindex`.
     ///
     /// # Arguments
-    /// * `ifname` - Name of the network interface (e.g., "wlan0").
+    /// * `selector` - Mesh selector (by name and/or ifindex).
+    ///
+    /// # Errors
+    /// Returns [`Error::Argument`] if validation fails.
+    /// Returns [`Error::Netlink`] if name resolution fails.
+    async fn selector_to_ifindex(&self, selector: model::MeshSelector) -> Result<u32, Error> {
+        selector
+            .validate()
+            .map_err(|err| Error::Argument(err.to_string()))?;
+
+        if let Some(ifindex) = selector.ifindex {
+            return Ok(ifindex);
+        }
+
+        if let Some(name) = selector.name {
+            return commands::if_nametoindex(name.as_str()).await.map_err(|_| {
+                Error::Netlink(format!(
+                    "Error - interface '{}' is not present or not a batman-adv interface",
+                    name
+                ))
+            });
+        }
+
+        Err(Error::Argument("Invalid selector".to_string()))
+    }
+
+    /// Resolves an `InterfaceSelector` into a concrete interface index.
+    ///
+    /// This method validates the selector first, then resolves by `ifindex` directly
+    /// when present or by interface `name` via `if_nametoindex`.
+    ///
+    /// # Arguments
+    /// * `selector` - Interface selector (by name and/or ifindex).
+    ///
+    /// # Errors
+    /// Returns [`Error::Argument`] if validation fails.
+    /// Returns [`Error::Netlink`] if name resolution fails.
+    async fn interface_selector_to_ifindex(
+        &self,
+        selector: model::InterfaceSelector,
+    ) -> Result<u32, Error> {
+        selector
+            .validate()
+            .map_err(|err| Error::Argument(err.to_string()))?;
+
+        if let Some(ifindex) = selector.ifindex {
+            return Ok(ifindex);
+        }
+
+        if let Some(name) = selector.name {
+            return commands::if_nametoindex(name.as_str()).await.map_err(|_| {
+                Error::Netlink(format!("Error - interface '{}' is not present", name))
+            });
+        }
+
+        Err(Error::Argument("Invalid selector".to_string()))
+    }
+
+    /// Retrieves the list of originators for the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let idx = client.if_nametoindex("bat0").await?;
-    /// println!("Interface index: {}", idx);
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let entries = client.originators(MeshSelector::with_name("bat0")).await?;
+    /// println!("{} originators", entries.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn if_nametoindex(&self, ifname: &str) -> Result<u32, RobinError> {
-        commands::if_nametoindex(ifname).await
+    pub async fn originators(
+        &self,
+        selector: model::MeshSelector,
+    ) -> Result<Vec<model::Originator>, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_originators(ifindex).await
     }
 
-    /// Converts a network interface index to its corresponding name.
+    /// Retrieves the list of gateways for the selected mesh interface.
     ///
     /// # Arguments
-    /// * `ifindex` - Interface index.
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let ifname = client.if_indextoname(3).await?;
-    /// println!("Interface name: {}", ifname);
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let gateways = client.gateways(MeshSelector::with_name("bat0")).await?;
+    /// println!("{} gateways", gateways.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn if_indextoname(&self, ifindex: u32) -> Result<String, RobinError> {
-        commands::if_indextoname(ifindex).await
+    #[tracing::instrument(skip(self))]
+    pub async fn gateways(
+        &self,
+        selector: model::MeshSelector,
+    ) -> Result<Vec<model::Gateway>, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_gateways_list(ifindex).await
     }
 
-    /// Retrieves the list of originators for the given mesh interface.
+    /// Subscribes to gateway change events for the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let originators = client.originators("bat0").await?;
-    /// for o in originators {
-    ///     println!("Originator: {}", o.originator);
+    /// use batman_robin::{Client, MeshSelector};
+    /// use futures::StreamExt;
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let mut events = client
+    ///     .subscribe_gateway_events(MeshSelector::with_name("bat0"))
+    ///     .await?;
+    ///
+    /// while let Some(event) = events.next().await {
+    ///     println!("{:?}", event?);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn originators(&self, mesh_if: &str) -> Result<Vec<model::Originator>, RobinError> {
-        commands::get_originators(mesh_if).await
+    #[tracing::instrument(skip(self))]
+    pub async fn subscribe_gateway_events(
+        &self,
+        selector: model::MeshSelector,
+    ) -> Result<BoxStream<'static, Result<model::GatewayEvent, Error>>, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::UeventListener::subscribe_events(ifindex).await
     }
 
-    /// Retrieves the list of gateways for the given mesh interface.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let gateways = client.gateways("bat0").await?;
-    /// for g in gateways {
-    ///     println!("Gateway: {}", g.mac_addr);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn gateways(&self, mesh_if: &str) -> Result<Vec<model::Gateway>, RobinError> {
-        commands::get_gateways_list(mesh_if).await
-    }
-
-    /// Gets the current gateway mode and configuration for the mesh interface.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let gw_info = client.get_gw_mode("bat0").await?;
-    /// println!("Gateway mode: {:?}", gw_info.mode);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_gw_mode(&self, mesh_if: &str) -> Result<model::GatewayInfo, RobinError> {
-        commands::get_gateway(mesh_if).await
-    }
-
-    /// Sets the gateway mode and optional bandwidth/selection parameters for the mesh interface.
+    /// Gets current gateway mode and related configuration for the selected mesh interface.
     ///
     /// # Arguments
-    /// * `mode` - Gateway mode (`Off`, `Client`, `Server`)
-    /// * `down` - Optional downlink bandwidth in kbit/s
-    /// * `up` - Optional uplink bandwidth in kbit/s
-    /// * `sel_class` - Optional selection class (for clients)
-    /// * `mesh_if` - Mesh interface name
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use batman_robin::GwMode;
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// client.set_gw_mode(GwMode::Server, Some(50000), Some(10000), None, "bat0").await?;
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let gw = client.get_gw_mode(MeshSelector::with_name("bat0")).await?;
+    /// println!("mode={:?}", gw.mode);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(skip(self))]
+    pub async fn get_gw_mode(
+        &self,
+        selector: model::MeshSelector,
+    ) -> Result<model::GatewayInfo, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_gateway(ifindex).await
+    }
+
+    /// Sets gateway mode and optional parameters for the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
+    /// * `mode` - Gateway mode to apply.
+    /// * `down` - Optional downstream bandwidth parameter.
+    /// * `up` - Optional upstream bandwidth parameter.
+    /// * `sel_class` - Optional gateway selection class.
+    ///
+    /// # Errors
+    /// Returns [`Error`] if selector validation, selector resolution, or netlink write fails.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, GwMode, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// client
+    ///     .set_gw_mode(
+    ///         MeshSelector::with_name("bat0"),
+    ///         GwMode::Client,
+    ///         None,
+    ///         None,
+    ///         Some(20),
+    ///     )
+    ///     .await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn set_gw_mode(
         &self,
+        selector: model::MeshSelector,
         mode: model::GwMode,
         down: Option<u32>,
         up: Option<u32>,
         sel_class: Option<u32>,
-        mesh_if: &str,
-    ) -> Result<(), RobinError> {
-        commands::set_gateway(mode, down, up, sel_class, mesh_if).await
+    ) -> Result<(), Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::set_gateway(mode, down, up, sel_class, ifindex).await
     }
 
-    /// Retrieves the global translation table entries.
+    /// Retrieves global translation table entries for the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let tg = client.transglobal("bat0").await?;
-    /// for entry in tg {
-    ///     println!("Client: {}", entry.client);
-    /// }
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let tg = client.transglobal(MeshSelector::with_name("bat0")).await?;
+    /// println!("{} global entries", tg.len());
     /// # Ok(())
     /// # }
     /// ```
     pub async fn transglobal(
         &self,
-        mesh_if: &str,
-    ) -> Result<Vec<model::TransglobalEntry>, RobinError> {
-        commands::get_transglobal(mesh_if).await
+        selector: model::MeshSelector,
+    ) -> Result<Vec<model::TransglobalEntry>, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_transglobal(ifindex).await
     }
 
-    /// Retrieves the local translation table entries.
+    /// Retrieves local translation table entries for the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let tl = client.translocal("bat0").await?;
-    /// for entry in tl {
-    ///     println!("Client: {}", entry.client);
-    /// }
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let tl = client.translocal(MeshSelector::with_name("bat0")).await?;
+    /// println!("{} local entries", tl.len());
     /// # Ok(())
     /// # }
     /// ```
     pub async fn translocal(
         &self,
-        mesh_if: &str,
-    ) -> Result<Vec<model::TranslocalEntry>, RobinError> {
-        commands::get_translocal(mesh_if).await
+        selector: model::MeshSelector,
+    ) -> Result<Vec<model::TranslocalEntry>, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_translocal(ifindex).await
     }
 
-    /// Retrieves the list of neighbors.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let neighbors = client.neighbors("bat0").await?;
-    /// for n in neighbors {
-    ///     println!("Neighbor: {}", n.neigh);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn neighbors(&self, mesh_if: &str) -> Result<Vec<model::Neighbor>, RobinError> {
-        commands::get_neighbors(mesh_if).await
-    }
-
-    /// Retrieves the list of physical interfaces attached to the mesh.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let interfaces = client.get_interface("bat0").await?;
-    /// for iface in interfaces {
-    ///     println!("{}: {}", iface.ifname, iface.active);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_interface(&self, mesh_if: &str) -> Result<Vec<model::Interface>, RobinError> {
-        commands::get_interfaces(mesh_if).await
-    }
-
-    /// Adds or removes a physical interface from the mesh.
+    /// Retrieves the list of neighbors for the selected mesh interface.
     ///
     /// # Arguments
-    /// * `iface` - Physical interface name
-    /// * `mesh_if` - Some(mesh_if) to add, None to remove
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// client.set_interface("wlan1", Some("bat0")).await?;
-    /// client.set_interface("wlan1", None).await?;
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let neighbors = client.neighbors(MeshSelector::with_name("bat0")).await?;
+    /// println!("{} neighbors", neighbors.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn set_interface(
+    pub async fn neighbors(
         &self,
-        iface: &str,
-        mesh_if: Option<&str>,
-    ) -> Result<(), RobinError> {
-        commands::set_interface(iface, mesh_if).await
+        selector: model::MeshSelector,
+    ) -> Result<Vec<model::Neighbor>, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_neighbors(ifindex).await
+    }
+
+    /// Retrieves the list of physical interfaces attached to the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let ifaces = client.interface_list(MeshSelector::with_name("bat0")).await?;
+    /// println!("{} attached interfaces", ifaces.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn interface_list(
+        &self,
+        selector: model::MeshSelector,
+    ) -> Result<Vec<model::Interface>, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_interfaces(ifindex).await
+    }
+
+    /// Adds a physical interface to a selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector identifying the target mesh interface.
+    /// * `interface_selector` - Interface selector for the physical interface to add.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, InterfaceSelector, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// client
+    ///     .interface_add(
+    ///         MeshSelector::with_name("bat0"),
+    ///         InterfaceSelector::with_name("wlan0"),
+    ///     )
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn interface_add(
+        &self,
+        selector: model::MeshSelector,
+        interface_selector: model::InterfaceSelector,
+    ) -> Result<(), Error> {
+        let mesh_ifindex = self.selector_to_ifindex(selector).await?;
+        let iface_ifindex = self
+            .interface_selector_to_ifindex(interface_selector)
+            .await?;
+
+        commands::set_interface(iface_ifindex, Some(mesh_ifindex)).await
+    }
+
+    /// Removes a physical interface from any mesh interface.
+    ///
+    /// # Arguments
+    /// * `interface_selector` - Interface selector for the physical interface to remove.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, InterfaceSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// client
+    ///     .interface_remove(InterfaceSelector::with_name("wlan0"))
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn interface_remove(
+        &self,
+        interface_selector: model::InterfaceSelector,
+    ) -> Result<(), Error> {
+        let iface_ifindex = self
+            .interface_selector_to_ifindex(interface_selector)
+            .await?;
+
+        commands::set_interface(iface_ifindex, None).await
     }
 
     /// Creates a new BATMAN-adv mesh interface with an optional routing algorithm.
     ///
+    /// # Arguments
+    /// * `mesh_if` - Name of the interface to create.
+    /// * `routing_algo` - Optional routing algorithm string.
+    ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// client.create_interface("bat0", Some("BATMAN_IV")).await?;
-    /// client.create_interface("bat1", None).await?;
+    /// use batman_robin::Client;
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// client.mesh_create("bat0", Some("BATMAN_V")).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn create_interface(
+    pub async fn mesh_create(
         &self,
         mesh_if: &str,
         routing_algo: Option<&str>,
-    ) -> Result<(), RobinError> {
+    ) -> Result<(), Error> {
         commands::create_interface(mesh_if, routing_algo).await
     }
 
-    /// Destroys a BATMAN-adv mesh interface.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// client.destroy_interface("bat0").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn destroy_interface(&self, mesh_if: &str) -> Result<(), RobinError> {
-        commands::destroy_interface(mesh_if).await
-    }
-
-    /// Counts the number of physical interfaces attached to the mesh.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let count = client.count_interfaces("bat0").await?;
-    /// println!("Attached interfaces: {}", count);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn count_interfaces(&self, mesh_if: &str) -> Result<u32, RobinError> {
-        commands::count_interfaces(mesh_if).await
-    }
-
-    /// Checks whether packet aggregation is enabled on a BATMAN-adv mesh interface.
-    ///
-    /// Packet aggregation combines multiple packets into one to reduce overhead
-    /// and improve throughput.
+    /// Destroys a BATMAN-adv mesh interface selected by name or ifindex.
     ///
     /// # Arguments
-    /// * `mesh_if` - The name of the mesh interface (e.g., `"bat0"`).
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let enabled = client.get_aggregation("bat0").await?;
-    /// println!("Aggregation enabled? {}", enabled);
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// client.mesh_delete(MeshSelector::with_name("bat0")).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_aggregation(&self, mesh_if: &str) -> Result<bool, RobinError> {
-        commands::get_aggregation(mesh_if).await
+    pub async fn mesh_delete(&self, selector: model::MeshSelector) -> Result<(), Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::destroy_interface(ifindex).await
     }
 
-    /// Enables or disables packet aggregation on a mesh interface.
+    /// Counts the number of physical interfaces attached to the selected mesh interface.
     ///
     /// # Arguments
-    /// * `mesh_if` - The mesh interface name.
-    /// * `val` - `true` to enable aggregation, `false` to disable.
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// // Enable aggregation
-    /// client.set_aggregation("bat0", true).await?;
+    /// use batman_robin::{Client, MeshSelector};
     ///
-    /// // Disable aggregation
-    /// client.set_aggregation("bat0", false).await?;
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let count = client.interfaces_count(MeshSelector::with_name("bat0")).await?;
+    /// println!("{count}");
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn set_aggregation(&self, mesh_if: &str, val: bool) -> Result<(), RobinError> {
-        commands::set_aggregation(mesh_if, val).await
+    pub async fn interfaces_count(&self, selector: model::MeshSelector) -> Result<u32, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::count_interfaces(ifindex).await
     }
 
-    /// Checks whether AP isolation is enabled on a mesh interface.
-    ///
-    /// AP isolation prevents clients on the same Wi-Fi network from communicating
-    /// directly, improving security in multi-client networks.
+    /// Gets whether packet aggregation is enabled on the selected mesh interface.
     ///
     /// # Arguments
-    /// * `mesh_if` - The mesh interface name.
+    /// * `selector` - Mesh selector.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let isolated = client.get_ap_isolation("bat0").await?;
-    /// println!("AP isolation enabled? {}", isolated);
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let enabled = client.get_aggregation(MeshSelector::with_name("bat0")).await?;
+    /// println!("{enabled}");
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_ap_isolation(&self, mesh_if: &str) -> Result<bool, RobinError> {
-        commands::get_ap_isolation(mesh_if).await
+    pub async fn get_aggregation(&self, selector: model::MeshSelector) -> Result<bool, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_aggregation(ifindex).await
     }
 
-    /// Enables or disables AP isolation on a mesh interface.
+    /// Enables or disables packet aggregation on the selected mesh interface.
     ///
     /// # Arguments
-    /// * `mesh_if` - Mesh interface name.
-    /// * `val` - `true` to enable isolation, `false` to disable.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// client.set_ap_isolation("bat0", true).await?; // enable
-    /// client.set_ap_isolation("bat0", false).await?; // disable
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn set_ap_isolation(&self, mesh_if: &str, val: bool) -> Result<(), RobinError> {
-        commands::set_ap_isolation(mesh_if, val).await
-    }
-
-    /// Checks whether bridge loop avoidance is enabled.
-    ///
-    /// Bridge loop avoidance prevents loops when multiple interfaces connect
-    /// the same network segment.
-    ///
-    /// # Arguments
-    /// * `mesh_if` - Mesh interface name.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let enabled = client.get_bridge_loop_avoidance("bat0").await?;
-    /// println!("Bridge loop avoidance: {}", enabled);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_bridge_loop_avoidance(&self, mesh_if: &str) -> Result<bool, RobinError> {
-        commands::get_bridge_loop_avoidance(mesh_if).await
-    }
-
-    /// Enables or disables bridge loop avoidance.
-    ///
-    /// # Arguments
-    /// * `mesh_if` - Mesh interface name.
+    /// * `selector` - Mesh selector.
     /// * `val` - `true` to enable, `false` to disable.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// client.set_bridge_loop_avoidance("bat0", true).await?; // enable
-    /// client.set_bridge_loop_avoidance("bat0", false).await?; // disable
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// client
+    ///     .set_aggregation(MeshSelector::with_name("bat0"), true)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_aggregation(
+        &self,
+        selector: model::MeshSelector,
+        val: bool,
+    ) -> Result<(), Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::set_aggregation(ifindex, val).await
+    }
+
+    /// Gets whether AP isolation is enabled on the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let enabled = client
+    ///     .get_ap_isolation(MeshSelector::with_name("bat0"))
+    ///     .await?;
+    /// println!("{enabled}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_ap_isolation(&self, selector: model::MeshSelector) -> Result<bool, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_ap_isolation(ifindex).await
+    }
+
+    /// Enables or disables AP isolation on the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
+    /// * `val` - `true` to enable, `false` to disable.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// client
+    ///     .set_ap_isolation(MeshSelector::with_name("bat0"), true)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_ap_isolation(
+        &self,
+        selector: model::MeshSelector,
+        val: bool,
+    ) -> Result<(), Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::set_ap_isolation(ifindex, val).await
+    }
+
+    /// Gets whether bridge loop avoidance is enabled on the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let enabled = client
+    ///     .get_bridge_loop_avoidance(MeshSelector::with_name("bat0"))
+    ///     .await?;
+    /// println!("{enabled}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_bridge_loop_avoidance(
+        &self,
+        selector: model::MeshSelector,
+    ) -> Result<bool, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_bridge_loop_avoidance(ifindex).await
+    }
+
+    /// Enables or disables bridge loop avoidance on the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
+    /// * `val` - `true` to enable, `false` to disable.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// client
+    ///     .set_bridge_loop_avoidance(MeshSelector::with_name("bat0"), true)
+    ///     .await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn set_bridge_loop_avoidance(
         &self,
-        mesh_if: &str,
+        selector: model::MeshSelector,
         val: bool,
-    ) -> Result<(), RobinError> {
-        commands::set_bridge_loop_avoidance(mesh_if, val).await
+    ) -> Result<(), Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::set_bridge_loop_avoidance(ifindex, val).await
     }
 
     /// Retrieves the system default routing algorithm for BATMAN-adv.
     ///
+    /// # Errors
+    /// Returns [`Error`] if the value cannot be retrieved from kernel state.
+    ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let default_algo = client.get_default_routing_algo().await?;
-    /// println!("Default routing algorithm: {}", default_algo);
+    /// use batman_robin::Client;
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let algo = client.get_default_routing_algo().await?;
+    /// println!("{algo}");
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_default_routing_algo(&self) -> Result<String, RobinError> {
+    pub async fn get_default_routing_algo(&self) -> Result<String, Error> {
         commands::get_default_routing_algo().await
     }
 
-    /// Retrieves all active routing algorithms currently in use along with
-    /// their corresponding mesh interfaces.
+    /// Retrieves all active routing algorithms currently in use and their interfaces.
     ///
-    /// Returns a vector of tuples `(interface_name, routing_algo_name)`.
+    /// Returns a vector of `(interface_name, algorithm_name)`.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
-    /// let active_algos = client.get_active_routing_algos().await?;
-    /// for (iface, algo) in active_algos {
-    ///     println!("Interface {} uses {}", iface, algo);
+    /// use batman_robin::Client;
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let active = client.get_active_routing_algos().await?;
+    /// for (iface, algo) in active {
+    ///     println!("{iface}: {algo}");
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_active_routing_algos(&self) -> Result<Vec<(String, String)>, RobinError> {
+    pub async fn get_active_routing_algos(&self) -> Result<Vec<(String, String)>, Error> {
         commands::get_active_routing_algos().await
     }
 
-    /// Retrieves the list of all routing algorithms available on the system.
+    /// Retrieves all routing algorithms available on the system.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
+    /// use batman_robin::Client;
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
     /// let available = client.get_available_routing_algos().await?;
-    /// println!("Available routing algorithms:");
-    /// for algo in available {
-    ///     println!(" * {}", algo);
-    /// }
+    /// println!("{} available algos", available.len());
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_available_routing_algos(&self) -> Result<Vec<String>, RobinError> {
+    pub async fn get_available_routing_algos(&self) -> Result<Vec<String>, Error> {
         commands::get_available_routing_algos().await
     }
 
     /// Sets the system default routing algorithm.
     ///
+    /// # Arguments
+    /// * `algo` - Algorithm name to set as default.
+    ///
     /// # Example
     ///
     /// ```no_run
-    /// # use batman_robin::Client;
-    /// # async fn example() -> Result<(), batman_robin::RobinError> {
-    /// # let client = Client::new();
+    /// use batman_robin::Client;
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
     /// client.set_default_routing_algo("BATMAN_V").await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn set_default_routing_algo(&self, algo: &str) -> Result<(), RobinError> {
+    pub async fn set_default_routing_algo(&self, algo: &str) -> Result<(), Error> {
         commands::set_default_routing_algo(algo).await
     }
 }

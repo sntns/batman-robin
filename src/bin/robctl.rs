@@ -2,10 +2,13 @@
 // Uses the CLI functionality from the batman_robin crate
 
 use batman_robin::Client;
+use batman_robin::InterfaceSelector;
+use batman_robin::MeshSelector;
 use batman_robin::cli::*;
+use futures::StreamExt;
 
-/// Handle a `RobinError` in a CLI-friendly way by printing the error and exiting.
-fn exit_on_error<T>(res: Result<T, batman_robin::RobinError>) -> T {
+/// Handle a `Error` in a CLI-friendly way by printing the error and exiting.
+fn exit_on_error<T>(res: Result<T, batman_robin::Error>) -> T {
     match res {
         Ok(v) => v,
         Err(e) => {
@@ -23,6 +26,7 @@ async fn main() {
         .get_one::<String>("meshif")
         .map(String::as_str)
         .unwrap_or("bat0");
+    let mesh_selector = MeshSelector::with_name(mesh_if);
 
     let algo_name = exit_on_error(client.get_default_routing_algo().await);
     if matches.get_flag("version") {
@@ -34,21 +38,41 @@ async fn main() {
         return;
     }
 
+    // Setup tracing & logging
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_env_filter("info,batman_robin=trace")
+        .init();
+    tracing::info!("Starting robctl...");
+
     match matches.subcommand() {
         Some(("neighbors", _)) => {
-            let entries = exit_on_error(client.neighbors(mesh_if).await);
+            let entries = exit_on_error(client.neighbors(mesh_selector.clone()).await);
             neighbors::print_neighbors(&entries, algo_name.as_str());
         }
-        Some(("gateways", _)) => {
-            let entries = exit_on_error(client.gateways(mesh_if).await);
-            gateways::print_gwl(&entries, algo_name.as_str());
-        }
+        Some(("gateways", sub_m)) => match sub_m.subcommand() {
+            Some(("listen", _)) => {
+                let mut events =
+                    exit_on_error(client.subscribe_gateway_events(mesh_selector.clone()).await);
+                gateways::print_gateway_event_header(mesh_if);
+
+                while let Some(event) = events.next().await {
+                    let event = exit_on_error(event);
+                    gateways::print_gateway_event(&event);
+                }
+            }
+            Some(("list", _)) | None => {
+                let entries = exit_on_error(client.gateways(mesh_selector.clone()).await);
+                gateways::print_gwl(&entries, algo_name.as_str());
+            }
+            _ => unreachable!("unsupported gateways subcommand"),
+        },
         Some(("gw_mode", sub_m)) => {
             let mode_str = sub_m.get_one::<String>("mode").map(String::as_str);
             let param_str = sub_m.get_one::<String>("param").map(String::as_str);
 
             if mode_str.is_none() {
-                let entries = exit_on_error(client.get_gw_mode(mesh_if).await);
+                let entries = exit_on_error(client.get_gw_mode(mesh_selector.clone()).await);
                 gw_mode::print_gw(&entries);
                 return;
             }
@@ -75,18 +99,22 @@ async fn main() {
                 (None, None, None)
             };
 
-            exit_on_error(client.set_gw_mode(mode, down, up, sel_class, mesh_if).await);
+            exit_on_error(
+                client
+                    .set_gw_mode(mesh_selector.clone(), mode, down, up, sel_class)
+                    .await,
+            );
         }
         Some(("originators", _)) => {
-            let entries = exit_on_error(client.originators(mesh_if).await);
+            let entries = exit_on_error(client.originators(mesh_selector.clone()).await);
             originators::print_originators(&entries, algo_name.as_str());
         }
         Some(("translocal", _)) => {
-            let entries = exit_on_error(client.translocal(mesh_if).await);
+            let entries = exit_on_error(client.translocal(mesh_selector.clone()).await);
             translocal::print_translocal(&entries);
         }
         Some(("transglobal", _)) => {
-            let entries = exit_on_error(client.transglobal(mesh_if).await);
+            let entries = exit_on_error(client.transglobal(mesh_selector.clone()).await);
             transglobal::print_transglobal(&entries);
         }
         Some(("interface", sub_m)) => {
@@ -98,7 +126,7 @@ async fn main() {
             };
 
             if action.is_none() {
-                let entries = exit_on_error(client.get_interface(mesh_if).await);
+                let entries = exit_on_error(client.interface_list(mesh_selector.clone()).await);
                 interface::print_interfaces(&entries);
                 return;
             }
@@ -110,7 +138,7 @@ async fn main() {
                         eprintln!("Error - extra parameter after '{}'", action);
                         return;
                     }
-                    exit_on_error(client.destroy_interface(mesh_if).await);
+                    exit_on_error(client.mesh_delete(mesh_selector.clone()).await);
                     return;
                 }
                 "create" | "c" => {
@@ -124,7 +152,7 @@ async fn main() {
                         }
                     };
 
-                    exit_on_error(client.create_interface(mesh_if, routing_algo).await);
+                    exit_on_error(client.mesh_create(mesh_if, routing_algo).await);
                     return;
                 }
                 "add" | "a" | "del" | "d" => {
@@ -133,27 +161,35 @@ async fn main() {
                         return;
                     }
 
-                    let exists = client.if_nametoindex(mesh_if).await.unwrap_or(0);
-                    if !manual && exists == 0 && action.starts_with("a") {
-                        exit_on_error(client.create_interface(mesh_if, None).await);
-                    }
-
-                    let pre_count = exit_on_error(client.count_interfaces(mesh_if).await);
+                    let pre_count =
+                        exit_on_error(client.interfaces_count(mesh_selector.clone()).await);
 
                     for iface in &params {
                         match action {
                             "add" | "a" => {
-                                exit_on_error(client.set_interface(iface, Some(mesh_if)).await);
+                                exit_on_error(
+                                    client
+                                        .interface_add(
+                                            mesh_selector.clone(),
+                                            InterfaceSelector::with_name(*iface),
+                                        )
+                                        .await,
+                                );
                             }
                             "del" | "d" => {
-                                exit_on_error(client.set_interface(iface, None).await);
+                                exit_on_error(
+                                    client
+                                        .interface_remove(InterfaceSelector::with_name(*iface))
+                                        .await,
+                                );
                             }
                             _ => unreachable!(),
                         }
                     }
 
                     if !manual && (action == "del" || action == "d") {
-                        let cnt = exit_on_error(client.count_interfaces(mesh_if).await);
+                        let cnt =
+                            exit_on_error(client.interfaces_count(mesh_selector.clone()).await);
 
                         if cnt == 0 && pre_count > 0 {
                             println!(
@@ -169,27 +205,39 @@ async fn main() {
         Some(("aggregation", sub_m)) => {
             let val = sub_m.get_one::<u8>("value");
             if let Some(v) = val {
-                exit_on_error(client.set_aggregation(mesh_if, *v == 1).await);
+                exit_on_error(client.set_aggregation(mesh_selector.clone(), *v == 1).await);
             } else {
-                let enabled = exit_on_error(client.get_aggregation(mesh_if).await);
+                let enabled = exit_on_error(client.get_aggregation(mesh_selector.clone()).await);
                 println!("{}", if enabled { "enabled" } else { "disabled" });
             }
         }
         Some(("ap_isolation", sub_m)) => {
             let val = sub_m.get_one::<u8>("value");
             if let Some(v) = val {
-                exit_on_error(client.set_ap_isolation(mesh_if, *v == 1).await);
+                exit_on_error(
+                    client
+                        .set_ap_isolation(mesh_selector.clone(), *v == 1)
+                        .await,
+                );
             } else {
-                let enabled = exit_on_error(client.get_ap_isolation(mesh_if).await);
+                let enabled = exit_on_error(client.get_ap_isolation(mesh_selector.clone()).await);
                 println!("{}", if enabled { "enabled" } else { "disabled" });
             }
         }
         Some(("bridge_loop_avoidance", sub_m)) => {
             let val = sub_m.get_one::<u8>("value");
             if let Some(v) = val {
-                exit_on_error(client.set_bridge_loop_avoidance(mesh_if, *v == 1).await);
+                exit_on_error(
+                    client
+                        .set_bridge_loop_avoidance(mesh_selector.clone(), *v == 1)
+                        .await,
+                );
             } else {
-                let enabled = exit_on_error(client.get_bridge_loop_avoidance(mesh_if).await);
+                let enabled = exit_on_error(
+                    client
+                        .get_bridge_loop_avoidance(mesh_selector.clone())
+                        .await,
+                );
                 println!("{}", if enabled { "enabled" } else { "disabled" });
             }
         }

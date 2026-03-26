@@ -1,5 +1,5 @@
-use crate::commands::{if_indextoname, if_nametoindex};
-use crate::error::RobinError;
+use crate::commands::if_indextoname;
+use crate::error::Error;
 use crate::model::{AttrValueForSend, Attribute, Command, Interface};
 use crate::netlink;
 
@@ -19,12 +19,12 @@ use neli::utils::Groups;
 ///
 /// # Arguments
 ///
-/// * `mesh_if` - The name of the mesh interface (e.g., `"bat0"`).
+/// * `mesh_ifindex` - The mesh interface index.
 ///
 /// # Returns
 ///
 /// Returns the number of interfaces currently enslaved to the given mesh interface,
-/// or a `RobinError` if the query fails.
+/// or a `Error` if the query fails.
 ///
 /// # Example
 ///
@@ -35,29 +35,20 @@ use neli::utils::Groups;
 /// println!("Number of interfaces: {}", count);
 /// # }
 /// ```
-pub async fn count_interfaces(mesh_if: &str) -> Result<u32, RobinError> {
-    let mesh_ifindex = if_nametoindex(mesh_if).await.map_err(|_| {
-        RobinError::Netlink(format!(
-            "Error - interface '{}' is not present or not a batman-adv interface",
-            mesh_if
-        ))
-    })?;
-
+pub async fn count_interfaces(mesh_ifindex: u32) -> Result<u32, Error> {
     let (rtnl, _) = NlRouter::connect(NlFamily::Route, None, Groups::empty())
         .await
-        .map_err(|_| {
-            RobinError::Netlink("Error - failed to connect to netlink router".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - failed to connect to netlink router".to_string()))?;
 
     rtnl.enable_ext_ack(true)
-        .map_err(|_| RobinError::Netlink("Error - failed to enable extended ACK".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to enable extended ACK".to_string()))?;
     rtnl.enable_strict_checking(true)
-        .map_err(|_| RobinError::Netlink("Error - failed to enable strict checking".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to enable strict checking".to_string()))?;
 
     let ifinfomsg = IfinfomsgBuilder::default()
         .ifi_family(RtAddrFamily::Unspecified)
         .build()
-        .map_err(|_| RobinError::Netlink("Error - failed to build Ifinfomsg".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build Ifinfomsg".to_string()))?;
 
     let mut response = rtnl
         .send::<_, _, Rtm, Ifinfomsg>(
@@ -66,13 +57,12 @@ pub async fn count_interfaces(mesh_if: &str) -> Result<u32, RobinError> {
             NlPayload::Payload(ifinfomsg),
         )
         .await
-        .map_err(|_| RobinError::Netlink("Error - failed to send Getlink request".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to send Getlink request".to_string()))?;
 
     let mut count = 0u32;
     while let Some(msg) = response.next().await {
-        let msg: Nlmsghdr<Rtm, Ifinfomsg> = msg.map_err(|_| {
-            RobinError::Netlink("Error - failed to parse netlink message".to_string())
-        })?;
+        let msg: Nlmsghdr<Rtm, Ifinfomsg> =
+            msg.map_err(|_| Error::Netlink("Error - failed to parse netlink message".to_string()))?;
 
         if let Some(payload) = msg.get_payload() {
             let attrs = payload.rtattrs().get_attr_handle();
@@ -94,11 +84,11 @@ pub async fn count_interfaces(mesh_if: &str) -> Result<u32, RobinError> {
 ///
 /// # Arguments
 ///
-/// * `mesh_if` - The name of the mesh interface.
+/// * `mesh_ifindex` - The mesh interface index.
 ///
 /// # Returns
 ///
-/// Returns a vector of `Interface` structs or a `RobinError` if the query fails.
+/// Returns a vector of `Interface` structs or a `Error` if the query fails.
 ///
 /// # Example
 ///
@@ -112,57 +102,43 @@ pub async fn count_interfaces(mesh_if: &str) -> Result<u32, RobinError> {
 /// }
 /// # }
 /// ```
-pub async fn get_interfaces(mesh_if: &str) -> Result<Vec<Interface>, RobinError> {
+pub async fn get_interfaces(mesh_ifindex: u32) -> Result<Vec<Interface>, Error> {
     let mut attrs = netlink::GenlAttrBuilder::new();
-    let mesh_ifindex = if_nametoindex(mesh_if).await.map_err(|_| {
-        RobinError::Netlink(format!(
-            "Error - interface '{}' is not present or not a batman-adv interface",
-            mesh_if
-        ))
-    })?;
 
     attrs
         .add(
             Attribute::BatadvAttrMeshIfindex,
             AttrValueForSend::U32(mesh_ifindex),
         )
-        .map_err(|_| {
-            RobinError::Netlink("Error - failed to add MeshIfindex attribute".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - failed to add MeshIfindex attribute".to_string()))?;
 
     let msg = netlink::build_genl_msg(Command::BatadvCmdGetHardif, attrs.build())
-        .map_err(|_| RobinError::Netlink("Error - failed to build netlink message".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build netlink message".to_string()))?;
 
     let mut sock = netlink::BatadvSocket::connect().await.map_err(|_| {
-        RobinError::Netlink("Error - failed to connect to batman-adv socket".to_string())
+        Error::Netlink("Error - failed to connect to batman-adv socket".to_string())
     })?;
 
     let mut response = sock
         .send(NlmF::REQUEST | NlmF::DUMP, msg)
         .await
-        .map_err(|_| RobinError::Netlink("Error - failed to send netlink request".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to send netlink request".to_string()))?;
 
     let mut interfaces = Vec::new();
     while let Some(msg) = response.next().await {
-        let msg: Nlmsghdr<u16, Genlmsghdr<u8, u16>> = msg.map_err(|_| {
-            RobinError::Netlink("Error - failed to parse netlink message".to_string())
-        })?;
+        let msg: Nlmsghdr<u16, Genlmsghdr<u8, u16>> =
+            msg.map_err(|_| Error::Netlink("Error - failed to parse netlink message".to_string()))?;
 
         match *msg.nl_type() {
-            x if x == Nlmsg::Done.into() => break,
-            x if x == Nlmsg::Error.into() => {
+            x if x == u16::from(Nlmsg::Done) => break,
+            x if x == u16::from(Nlmsg::Error) => {
                 match &msg.nl_payload() {
                     NlPayload::Err(err) if *err.error() == 0 => break, // end of dump
                     NlPayload::Err(err) => {
-                        return Err(RobinError::Netlink(format!(
-                            "Netlink error {}",
-                            err.error()
-                        )));
+                        return Err(Error::Netlink(format!("Netlink error {}", err.error())));
                     }
                     _ => {
-                        return Err(RobinError::Netlink(
-                            "Unknown netlink error payload".to_string(),
-                        ));
+                        return Err(Error::Netlink("Unknown netlink error payload".to_string()));
                     }
                 }
             }
@@ -171,16 +147,16 @@ pub async fn get_interfaces(mesh_if: &str) -> Result<Vec<Interface>, RobinError>
 
         let attrs = msg
             .get_payload()
-            .ok_or_else(|| RobinError::Parse("Error - message has no payload".into()))?
+            .ok_or_else(|| Error::Argument("Error - message has no payload".into()))?
             .attrs()
             .get_attr_handle();
 
         let hard_ifindex = attrs
             .get_attr_payload_as::<u32>(Attribute::BatadvAttrHardIfindex.into())
-            .map_err(|_| RobinError::Parse("Error - missing HARD_IFINDEX".into()))?;
+            .map_err(|_| Error::Argument("Error - missing HARD_IFINDEX".into()))?;
 
         let ifname = if_indextoname(hard_ifindex).await.map_err(|_| {
-            RobinError::Netlink(format!(
+            Error::Netlink(format!(
                 "Error - failed to resolve interface index {}",
                 hard_ifindex
             ))
@@ -202,49 +178,38 @@ pub async fn get_interfaces(mesh_if: &str) -> Result<Vec<Interface>, RobinError>
 ///
 /// # Arguments
 ///
-/// * `iface` - The name of the interface to add or remove.
-/// * `mesh_if` - Optional mesh interface name to attach to. `None` removes it from any mesh.
+/// * `iface_ifindex` - The index of the interface to add or remove.
+/// * `mesh_ifindex` - Optional mesh interface index to attach to. `None` removes it from any mesh.
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` on success, or a `RobinError` if the operation fails.
+/// Returns `Ok(())` on success, or a `Error` if the operation fails.
 ///
 /// # Example
 ///
 /// ```no_run
 /// # async fn example() {
-/// // set_interface("eth0", Some("bat0")).await?;
-/// // set_interface("eth0", None).await?; // remove from mesh
+/// // set_interface(3, Some(5)).await?;
+/// // set_interface(3, None).await?; // remove from mesh
 /// # }
 /// ```
-pub async fn set_interface(iface: &str, mesh_if: Option<&str>) -> Result<(), RobinError> {
-    let iface_ifindex = if_nametoindex(iface)
-        .await
-        .map_err(|_| RobinError::Netlink(format!("Error - interface '{}' not found", iface)))?;
-
-    let mut mesh_ifindex = 0;
-    if let Some(mesh) = mesh_if {
-        mesh_ifindex = if_nametoindex(mesh).await.map_err(|_| {
-            RobinError::Netlink(format!("Error - mesh interface '{}' not found", mesh))
-        })?;
-    }
+pub async fn set_interface(iface_ifindex: u32, mesh_ifindex: Option<u32>) -> Result<(), Error> {
+    let mesh_ifindex = mesh_ifindex.unwrap_or(0);
 
     let (rtnl, _) = NlRouter::connect(NlFamily::Route, None, Groups::empty())
         .await
-        .map_err(|_| {
-            RobinError::Netlink("Error - failed to connect to netlink router".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - failed to connect to netlink router".to_string()))?;
 
     rtnl.enable_ext_ack(true)
-        .map_err(|_| RobinError::Netlink("Error - failed to enable extended ACK".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to enable extended ACK".to_string()))?;
     rtnl.enable_strict_checking(true)
-        .map_err(|_| RobinError::Netlink("Error - failed to enable strict checking".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to enable strict checking".to_string()))?;
 
     let master_attr = RtattrBuilder::default()
         .rta_type(Ifla::Master)
         .rta_payload(mesh_ifindex)
         .build()
-        .map_err(|_| RobinError::Netlink("Error - failed to build Master attribute".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build Master attribute".to_string()))?;
 
     let mut rtattrs: RtBuffer<Ifla, Buffer> = RtBuffer::new();
     rtattrs.push(master_attr);
@@ -254,7 +219,7 @@ pub async fn set_interface(iface: &str, mesh_if: Option<&str>) -> Result<(), Rob
         .ifi_index(iface_ifindex.cast_signed())
         .rtattrs(rtattrs)
         .build()
-        .map_err(|_| RobinError::Netlink("Error - failed to build Ifinfomsg".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build Ifinfomsg".to_string()))?;
 
     rtnl.send::<_, _, Rtm, Ifinfomsg>(
         Rtm::Setlink,
@@ -262,7 +227,7 @@ pub async fn set_interface(iface: &str, mesh_if: Option<&str>) -> Result<(), Rob
         NlPayload::Payload(msg),
     )
     .await
-    .map_err(|_| RobinError::Netlink("Error - failed to set interface".to_string()))?;
+    .map_err(|_| Error::Netlink("Error - failed to set interface".to_string()))?;
 
     Ok(())
 }
@@ -278,7 +243,7 @@ pub async fn set_interface(iface: &str, mesh_if: Option<&str>) -> Result<(), Rob
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` on success, or a `RobinError` if creation fails.
+/// Returns `Ok(())` on success, or a `Error` if creation fails.
 ///
 /// # Example
 ///
@@ -287,32 +252,28 @@ pub async fn set_interface(iface: &str, mesh_if: Option<&str>) -> Result<(), Rob
 /// // create_interface("bat0", Some("BATMAN_IV")).await?;
 /// # }
 /// ```
-pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Result<(), RobinError> {
+pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Result<(), Error> {
     const IFLA_BATADV_ALGO_NAME: u16 = 1;
     let (rtnl, _) = NlRouter::connect(NlFamily::Route, None, Groups::empty())
         .await
-        .map_err(|_| {
-            RobinError::Netlink("Error - failed to connect to netlink router".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - failed to connect to netlink router".to_string()))?;
 
     rtnl.enable_ext_ack(true)
-        .map_err(|_| RobinError::Netlink("Error - failed to enable extended ACK".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to enable extended ACK".to_string()))?;
     rtnl.enable_strict_checking(true)
-        .map_err(|_| RobinError::Netlink("Error - failed to enable strict checking".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to enable strict checking".to_string()))?;
 
     let ifname_attr = RtattrBuilder::default()
         .rta_type(Ifla::Ifname)
         .rta_payload(mesh_if)
         .build()
-        .map_err(|_| RobinError::Netlink("Error - failed to build IFNAME attribute".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build IFNAME attribute".to_string()))?;
 
     let kind_attr = RtattrBuilder::default()
         .rta_type(IflaInfo::Kind)
         .rta_payload("batadv")
         .build()
-        .map_err(|_| {
-            RobinError::Netlink("Error - failed to build INFO_KIND attribute".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - failed to build INFO_KIND attribute".to_string()))?;
 
     let mut info_data_attrs: RtBuffer<u16, Buffer> = RtBuffer::new();
     if let Some(algo) = routing_algo {
@@ -321,7 +282,7 @@ pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Resu
             .rta_payload(algo)
             .build()
             .map_err(|_| {
-                RobinError::Netlink("Error - failed to build ALGO_NAME attribute".to_string())
+                Error::Netlink("Error - failed to build ALGO_NAME attribute".to_string())
             })?;
         info_data_attrs.push(algo_attr);
     }
@@ -330,9 +291,7 @@ pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Resu
         .rta_type(IflaInfo::Data)
         .rta_payload(info_data_attrs)
         .build()
-        .map_err(|_| {
-            RobinError::Netlink("Error - failed to build INFO_DATA attribute".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - failed to build INFO_DATA attribute".to_string()))?;
 
     let mut linkinfo_attrs: RtBuffer<IflaInfo, Buffer> = RtBuffer::new();
     linkinfo_attrs.push(kind_attr);
@@ -342,9 +301,7 @@ pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Resu
         .rta_type(Ifla::Linkinfo)
         .rta_payload(linkinfo_attrs)
         .build()
-        .map_err(|_| {
-            RobinError::Netlink("Error - failed to build LINKINFO attribute".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - failed to build LINKINFO attribute".to_string()))?;
 
     let mut rtattrs: RtBuffer<Ifla, Buffer> = RtBuffer::new();
     rtattrs.push(ifname_attr);
@@ -354,7 +311,7 @@ pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Resu
         .ifi_family(RtAddrFamily::Unspecified)
         .rtattrs(rtattrs)
         .build()
-        .map_err(|_| RobinError::Netlink("Error - failed to build Ifinfomsg".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build Ifinfomsg".to_string()))?;
 
     rtnl.send::<_, _, Rtm, Ifinfomsg>(
         Rtm::Newlink,
@@ -362,7 +319,7 @@ pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Resu
         NlPayload::Payload(msg),
     )
     .await
-    .map_err(|_| RobinError::Netlink("Error - failed to create mesh interface".to_string()))?;
+    .map_err(|_| Error::Netlink("Error - failed to create mesh interface".to_string()))?;
 
     Ok(())
 }
@@ -373,11 +330,11 @@ pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Resu
 ///
 /// # Arguments
 ///
-/// * `mesh_if` - The name of the mesh interface to destroy.
+/// * `mesh_ifindex` - The interface index of the mesh interface to destroy.
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` on success, or a `RobinError` if destruction fails.
+/// Returns `Ok(())` on success, or a `Error` if destruction fails.
 ///
 /// # Example
 ///
@@ -386,32 +343,21 @@ pub async fn create_interface(mesh_if: &str, routing_algo: Option<&str>) -> Resu
 /// // destroy_interface("bat0").await?;
 /// # }
 /// ```
-pub async fn destroy_interface(mesh_if: &str) -> Result<(), RobinError> {
+pub async fn destroy_interface(mesh_ifindex: u32) -> Result<(), Error> {
     let (rtnl, _) = NlRouter::connect(NlFamily::Route, None, Groups::empty())
         .await
-        .map_err(|_| {
-            RobinError::Netlink("Error - failed to connect to netlink router".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - failed to connect to netlink router".to_string()))?;
 
     rtnl.enable_ext_ack(true)
-        .map_err(|_| RobinError::Netlink("Error - failed to enable extended ACK".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to enable extended ACK".to_string()))?;
     rtnl.enable_strict_checking(true)
-        .map_err(|_| RobinError::Netlink("Error - failed to enable strict checking".to_string()))?;
-
-    let ifname_attr = RtattrBuilder::default()
-        .rta_type(Ifla::Ifname)
-        .rta_payload(mesh_if)
-        .build()
-        .map_err(|_| RobinError::Netlink("Error - failed to build IFNAME attribute".to_string()))?;
-
-    let mut rtattrs: RtBuffer<Ifla, Buffer> = RtBuffer::new();
-    rtattrs.push(ifname_attr);
+        .map_err(|_| Error::Netlink("Error - failed to enable strict checking".to_string()))?;
 
     let msg = IfinfomsgBuilder::default()
         .ifi_family(RtAddrFamily::Unspecified)
-        .rtattrs(rtattrs)
+        .ifi_index(mesh_ifindex.cast_signed())
         .build()
-        .map_err(|_| RobinError::Netlink("Error - failed to build Ifinfomsg".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build Ifinfomsg".to_string()))?;
 
     rtnl.send::<_, _, Rtm, Ifinfomsg>(
         Rtm::Dellink,
@@ -419,7 +365,7 @@ pub async fn destroy_interface(mesh_if: &str) -> Result<(), RobinError> {
         NlPayload::Payload(msg),
     )
     .await
-    .map_err(|_| RobinError::Netlink("Error - failed to destroy mesh interface".to_string()))?;
+    .map_err(|_| Error::Netlink("Error - failed to destroy mesh interface".to_string()))?;
 
     Ok(())
 }

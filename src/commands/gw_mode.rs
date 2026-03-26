@@ -1,5 +1,4 @@
-use crate::commands::if_nametoindex;
-use crate::error::RobinError;
+use crate::error::Error;
 use crate::model::{AttrValueForSend, Attribute, Command, GatewayInfo, GwMode};
 use crate::netlink;
 
@@ -14,51 +13,43 @@ use neli::nl::Nlmsghdr;
 ///
 /// # Arguments
 ///
-/// * `mesh_if` - The name of the BATMAN-adv mesh interface (e.g., "bat0").
+/// * `ifindex` - The mesh interface index.
 ///
 /// # Returns
 ///
 /// Returns a `GatewayInfo` struct containing the mode, selection class, bandwidths,
-/// and routing algorithm, or a `RobinError` if the information could not be retrieved.
-pub async fn get_gateway(mesh_if: &str) -> Result<GatewayInfo, RobinError> {
+/// and routing algorithm, or a `Error` if the information could not be retrieved.
+pub async fn get_gateway(ifindex: u32) -> Result<GatewayInfo, Error> {
     let mut attrs = netlink::GenlAttrBuilder::new();
-    let ifindex = if_nametoindex(mesh_if).await.map_err(|_| {
-        RobinError::Netlink(format!(
-            "Error - interface '{}' is not present or not a batman-adv interface",
-            mesh_if
-        ))
-    })?;
 
     attrs
         .add(
             Attribute::BatadvAttrMeshIfindex,
             AttrValueForSend::U32(ifindex),
         )
-        .map_err(|_| {
-            RobinError::Netlink("Error - could not set mesh interface index".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - could not set mesh interface index".to_string()))?;
 
     let msg = netlink::build_genl_msg(Command::BatadvCmdGetMeshInfo, attrs.build())
-        .map_err(|_| RobinError::Netlink("Error - failed to build netlink message".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build netlink message".to_string()))?;
 
     let mut socket = netlink::BatadvSocket::connect().await.map_err(|_| {
-        RobinError::Netlink("Error - failed to connect to batman-adv netlink socket".to_string())
+        Error::Netlink("Error - failed to connect to batman-adv netlink socket".to_string())
     })?;
 
     let mut response = socket
         .send(NlmF::REQUEST, msg)
         .await
-        .map_err(|_| RobinError::Netlink("Error - failed to send netlink request".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to send netlink request".to_string()))?;
 
     let msg: Nlmsghdr<u16, Genlmsghdr<u8, u16>> = response
         .next()
         .await
-        .ok_or_else(|| RobinError::Parse("Error - no response from kernel".into()))?
-        .map_err(|_| RobinError::Netlink("Error - failed to parse netlink response".to_string()))?;
+        .ok_or_else(|| Error::Argument("Error - no response from kernel".into()))?
+        .map_err(|_| Error::Netlink("Error - failed to parse netlink response".to_string()))?;
 
     let attrs = msg
         .get_payload()
-        .ok_or_else(|| RobinError::Parse("Error - message has no payload".into()))?
+        .ok_or_else(|| Error::Argument("Error - message has no payload".into()))?
         .attrs()
         .get_attr_handle();
 
@@ -72,15 +63,15 @@ pub async fn get_gateway(mesh_if: &str) -> Result<GatewayInfo, RobinError> {
 
     let sel_class = attrs
         .get_attr_payload_as::<u32>(Attribute::BatadvAttrGwSelClass.into())
-        .map_err(|_| RobinError::Parse("Error - gateway selection class missing".into()))?;
+        .map_err(|_| Error::Argument("Error - gateway selection class missing".into()))?;
 
     let bandwidth_down = attrs
         .get_attr_payload_as::<u32>(Attribute::BatadvAttrGwBandwidthDown.into())
-        .map_err(|_| RobinError::Parse("Error - gateway downstream bandwidth missing".into()))?;
+        .map_err(|_| Error::Argument("Error - gateway downstream bandwidth missing".into()))?;
 
     let bandwidth_up = attrs
         .get_attr_payload_as::<u32>(Attribute::BatadvAttrGwBandwidthUp.into())
-        .map_err(|_| RobinError::Parse("Error - gateway upstream bandwidth missing".into()))?;
+        .map_err(|_| Error::Argument("Error - gateway upstream bandwidth missing".into()))?;
 
     let algo = attrs
         .get_attr_payload_as_with_len::<Vec<u8>>(Attribute::BatadvAttrAlgoName.into())
@@ -88,7 +79,7 @@ pub async fn get_gateway(mesh_if: &str) -> Result<GatewayInfo, RobinError> {
             let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             String::from_utf8_lossy(&bytes[..nul]).into_owned()
         })
-        .map_err(|_| RobinError::Parse("Error - routing algorithm name missing".into()))?;
+        .map_err(|_| Error::Argument("Error - routing algorithm name missing".into()))?;
 
     Ok(GatewayInfo {
         mode,
@@ -110,42 +101,34 @@ pub async fn get_gateway(mesh_if: &str) -> Result<GatewayInfo, RobinError> {
 /// * `down` - Optional downstream bandwidth in Mbps (used when mode is Server).
 /// * `up` - Optional upstream bandwidth in Mbps (used when mode is Server).
 /// * `sel_class` - Optional selection class (used when mode is Server).
-/// * `mesh_if` - The name of the BATMAN-adv mesh interface (e.g., "bat0").
+/// * `ifindex` - The mesh interface index.
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` if the settings were applied successfully, or a `RobinError` if
+/// Returns `Ok(())` if the settings were applied successfully, or a `Error` if
 /// the operation failed or was rejected by the kernel.
 pub async fn set_gateway(
     mode: GwMode,
     down: Option<u32>,
     up: Option<u32>,
     sel_class: Option<u32>,
-    mesh_if: &str,
-) -> Result<(), RobinError> {
+    ifindex: u32,
+) -> Result<(), Error> {
     let mut attrs = netlink::GenlAttrBuilder::new();
-    let ifindex = if_nametoindex(mesh_if).await.map_err(|_| {
-        RobinError::Netlink(format!(
-            "Error - interface '{}' is not present or not a batman-adv interface",
-            mesh_if
-        ))
-    })?;
 
     attrs
         .add(
             Attribute::BatadvAttrMeshIfindex,
             AttrValueForSend::U32(ifindex),
         )
-        .map_err(|_| {
-            RobinError::Netlink("Error - could not set mesh interface index".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - could not set mesh interface index".to_string()))?;
 
     match mode {
         GwMode::Off => {
             attrs
                 .add(Attribute::BatadvAttrGwMode, AttrValueForSend::U8(0))
                 .map_err(|_| {
-                    RobinError::Netlink("Error - could not set gateway mode to OFF".to_string())
+                    Error::Netlink("Error - could not set gateway mode to OFF".to_string())
                 })?;
         }
 
@@ -153,7 +136,7 @@ pub async fn set_gateway(
             attrs
                 .add(Attribute::BatadvAttrGwMode, AttrValueForSend::U8(1))
                 .map_err(|_| {
-                    RobinError::Netlink("Error - could not set gateway mode to CLIENT".to_string())
+                    Error::Netlink("Error - could not set gateway mode to CLIENT".to_string())
                 })?;
         }
 
@@ -161,7 +144,7 @@ pub async fn set_gateway(
             attrs
                 .add(Attribute::BatadvAttrGwMode, AttrValueForSend::U8(2))
                 .map_err(|_| {
-                    RobinError::Netlink("Error - could not set gateway mode to SERVER".to_string())
+                    Error::Netlink("Error - could not set gateway mode to SERVER".to_string())
                 })?;
 
             attrs
@@ -170,9 +153,7 @@ pub async fn set_gateway(
                     AttrValueForSend::U32(down.unwrap_or(10000) / 100),
                 )
                 .map_err(|_| {
-                    RobinError::Netlink(
-                        "Error - could not set gateway downstream bandwidth".to_string(),
-                    )
+                    Error::Netlink("Error - could not set gateway downstream bandwidth".to_string())
                 })?;
 
             attrs
@@ -181,9 +162,7 @@ pub async fn set_gateway(
                     AttrValueForSend::U32(up.unwrap_or(2000) / 100),
                 )
                 .map_err(|_| {
-                    RobinError::Netlink(
-                        "Error - could not set gateway upstream bandwidth".to_string(),
-                    )
+                    Error::Netlink("Error - could not set gateway upstream bandwidth".to_string())
                 })?;
 
             attrs
@@ -192,28 +171,28 @@ pub async fn set_gateway(
                     AttrValueForSend::U32(sel_class.unwrap_or(0)),
                 )
                 .map_err(|_| {
-                    RobinError::Netlink("Error - could not set gateway selection class".to_string())
+                    Error::Netlink("Error - could not set gateway selection class".to_string())
                 })?;
         }
 
         GwMode::Unknown => {
-            return Err(RobinError::Parse(
+            return Err(Error::Argument(
                 "Cannot set unknown gateway mode".to_string(),
             ));
         }
     }
 
     let msg = netlink::build_genl_msg(Command::BatadvCmdSetMesh, attrs.build())
-        .map_err(|_| RobinError::Netlink("Error - failed to build netlink message".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build netlink message".to_string()))?;
 
     let mut socket = netlink::BatadvSocket::connect().await.map_err(|_| {
-        RobinError::Netlink("Error - failed to connect to batman-adv netlink socket".to_string())
+        Error::Netlink("Error - failed to connect to batman-adv netlink socket".to_string())
     })?;
 
     socket
         .send(NlmF::REQUEST | NlmF::ACK, msg)
         .await
-        .map_err(|_| RobinError::Netlink("Error - failed to send netlink request".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to send netlink request".to_string()))?;
 
     Ok(())
 }

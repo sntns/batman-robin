@@ -1,4 +1,4 @@
-use crate::error::RobinError;
+use crate::error::Error;
 use crate::model::Command;
 
 use neli::consts::nl::NlmF;
@@ -14,7 +14,7 @@ use neli::types::{Buffer, GenlBuffer};
 ///
 /// # Returns
 /// - `Ok(Genlmsghdr<u8, u16>)` containing the constructed Generic Netlink header with payload.
-/// - `Err(RobinError)` if building the GENL header fails.
+/// - `Err(Error)` if building the GENL header fails.
 ///
 /// # Notes
 /// The `attrs` should include at least the mesh interface index or name (`BatadvAttrMeshIfindex`
@@ -23,14 +23,14 @@ use neli::types::{Buffer, GenlBuffer};
 pub fn build_genl_msg(
     cmd: Command,
     attrs: GenlBuffer<u16, Buffer>,
-) -> Result<Genlmsghdr<u8, u16>, RobinError> {
+) -> Result<Genlmsghdr<u8, u16>, Error> {
     // Build GENL header with attributes
     let genl_msg = GenlmsghdrBuilder::default()
         .cmd(cmd.into())
         .version(1)
         .attrs(attrs)
         .build()
-        .map_err(|e| RobinError::Netlink(format!("Failed to build GENL header: {:?}", e)))?;
+        .map_err(|e| Error::Netlink(format!("Failed to build GENL header: {:?}", e)))?;
 
     Ok(genl_msg)
 }
@@ -45,7 +45,7 @@ pub fn build_genl_msg(
 ///
 /// # Returns
 /// - `Ok(Nlmsghdr<u16, Genlmsghdr<u8, u16>>)` ready to be sent via a Netlink socket.
-/// - `Err(RobinError)` if building either the GENL or NL headers fails.
+/// - `Err(Error)` if building either the GENL or NL headers fails.
 ///
 /// # Notes
 /// - Sets `NLM_F_REQUEST | NLM_F_DUMP` flags: `REQUEST` signals a request, `DUMP` is for
@@ -57,10 +57,10 @@ pub fn build_nl_msg(
     cmd: Command,
     attrs: GenlBuffer<u16, Buffer>,
     seq: u32,
-) -> Result<Nlmsghdr<u16, Genlmsghdr<u8, u16>>, RobinError> {
+) -> Result<Nlmsghdr<u16, Genlmsghdr<u8, u16>>, Error> {
     // Build GENL header with attributes
     let genl_msg = build_genl_msg(cmd, attrs)
-        .map_err(|e| RobinError::Netlink(format!("Failed to build GENL header: {:?}", e)))?;
+        .map_err(|e| Error::Netlink(format!("Failed to build GENL header: {:?}", e)))?;
 
     // Build Netlink header with payload
     let nl_msg = NlmsghdrBuilder::default()
@@ -70,7 +70,7 @@ pub fn build_nl_msg(
         .nl_pid(0) // 0 lets the kernel fill in the sender PID
         .nl_payload(NlPayload::Payload(genl_msg))
         .build()
-        .map_err(|e| RobinError::Netlink(format!("Failed to build NL header: {:?}", e)))?;
+        .map_err(|e| Error::Netlink(format!("Failed to build NL header: {:?}", e)))?;
 
     Ok(nl_msg)
 }

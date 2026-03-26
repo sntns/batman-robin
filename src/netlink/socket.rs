@@ -1,4 +1,4 @@
-use crate::error::RobinError;
+use crate::error::Error;
 
 use neli::consts::nl::NlmF;
 use neli::consts::socket::NlFamily;
@@ -23,17 +23,15 @@ impl BatadvSocket {
     ///
     /// # Returns
     /// - `Ok(Self)` on success with an initialized `BatadvSocket`.
-    /// - `Err(RobinError)` if the connection or family resolution fails.
-    pub async fn connect() -> Result<Self, RobinError> {
+    /// - `Err(Error)` if the connection or family resolution fails.
+    pub async fn connect() -> Result<Self, Error> {
         let (sock, _mcast) = NlRouter::connect(NlFamily::Generic, None, Groups::empty())
             .await
-            .map_err(|e| {
-                RobinError::Netlink(format!("Failed to connect with NlRouter: {:?}", e))
-            })?;
+            .map_err(|e| Error::Netlink(format!("Failed to connect with NlRouter: {:?}", e)))?;
         let family_id = sock
             .resolve_genl_family("batadv")
             .await
-            .map_err(|e| RobinError::Netlink(format!("Failed to resolve family: {:?}", e)))?;
+            .map_err(|e| Error::Netlink(format!("Failed to resolve family: {:?}", e)))?;
 
         Ok(Self { sock, family_id })
     }
@@ -46,17 +44,17 @@ impl BatadvSocket {
     ///
     /// # Returns
     /// - `Ok(NlRouterReceiverHandle)` to asynchronously iterate over responses.
-    /// - `Err(RobinError)` if sending the message fails.
+    /// - `Err(Error)` if sending the message fails.
     pub async fn send(
         &mut self,
         flags: NlmF,
         msg: Genlmsghdr<u8, u16>,
-    ) -> Result<NlRouterReceiverHandle<u16, Genlmsghdr<u8, u16>>, RobinError> {
+    ) -> Result<NlRouterReceiverHandle<u16, Genlmsghdr<u8, u16>>, Error> {
         let recv = self
             .sock
             .send(self.family_id, flags, NlPayload::Payload(msg))
             .await
-            .map_err(|e| RobinError::Netlink(format!("Failed to send message: {:?}", e)))?;
+            .map_err(|e| Error::Netlink(format!("Failed to send message: {:?}", e)))?;
 
         Ok(recv)
     }

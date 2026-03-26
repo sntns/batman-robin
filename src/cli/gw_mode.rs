@@ -1,4 +1,4 @@
-use crate::{GatewayInfo, GwMode, RobinError};
+use crate::{Error, GatewayInfo, GwMode};
 
 use clap::{Arg, Command};
 
@@ -94,36 +94,36 @@ pub fn print_gw(info: &GatewayInfo) {
 ///   - `down` and `up` are bandwidth values in kbit for `Server` mode.
 ///   - `sel_class` is used for `Client` mode.
 ///   - `None` values for `Off` mode.
-/// - `Err(RobinError)` if parsing fails or mode is `Unknown`.
+/// - `Err(Error)` if parsing fails or mode is `Unknown`.
 ///
 /// # Notes
 /// - For server mode, the `param` can be `"down/up"` and supports optional `"kbit"` or `"MBit"` suffix.
 /// - For client mode, `param` is parsed as a selection class integer.
-pub fn parse_gw_param(mode: GwMode, param: &str) -> Result<GwParseResult, RobinError> {
+pub fn parse_gw_param(mode: GwMode, param: &str) -> Result<GwParseResult, Error> {
     match mode {
         GwMode::Off => Ok((None, None, None)),
         GwMode::Client => {
-            let sel_class = param.parse::<u32>().map_err(|e| {
-                RobinError::Parse(format!("Invalid sel_class '{}': {:?}", param, e))
-            })?;
+            let sel_class = param
+                .parse::<u32>()
+                .map_err(|e| Error::Argument(format!("Invalid sel_class '{}': {:?}", param, e)))?;
             Ok((None, None, Some(sel_class)))
         }
         GwMode::Server => {
             let parts: Vec<&str> = param.split('/').collect();
-            let parse_value = |s: &str| -> Result<u32, RobinError> {
+            let parse_value = |s: &str| -> Result<u32, Error> {
                 let s = s.trim().to_lowercase();
                 if s.ends_with("kbit") {
                     Ok(s.trim_end_matches("kbit").parse::<u32>().map_err(|e| {
-                        RobinError::Parse(format!("Invalid bandwidth '{}': {:?}", s, e))
+                        Error::Argument(format!("Invalid bandwidth '{}': {:?}", s, e))
                     })?)
                 } else if s.ends_with("mbit") {
                     let val = s.trim_end_matches("mbit").parse::<u32>().map_err(|e| {
-                        RobinError::Parse(format!("Invalid bandwidth '{}': {:?}", s, e))
+                        Error::Argument(format!("Invalid bandwidth '{}': {:?}", s, e))
                     })?;
                     Ok(val * 1000)
                 } else {
                     Ok(s.parse::<u32>().map_err(|e| {
-                        RobinError::Parse(format!("Invalid bandwidth '{}': {:?}", s, e))
+                        Error::Argument(format!("Invalid bandwidth '{}': {:?}", s, e))
                     })?)
                 }
             };
@@ -137,6 +137,6 @@ pub fn parse_gw_param(mode: GwMode, param: &str) -> Result<GwParseResult, RobinE
 
             Ok((Some(down), up, None))
         }
-        GwMode::Unknown => Err(RobinError::NotFound("Unknown mode".to_string())),
+        GwMode::Unknown => Err(Error::NotFound("Unknown mode".to_string())),
     }
 }

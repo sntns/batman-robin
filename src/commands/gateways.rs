@@ -1,5 +1,5 @@
-use crate::commands::{if_indextoname, if_nametoindex};
-use crate::error::RobinError;
+use crate::commands::if_indextoname;
+use crate::error::Error;
 use crate::model::{AttrValueForSend, Attribute, Command, Gateway};
 use crate::netlink;
 
@@ -16,12 +16,12 @@ use neli::nl::{NlPayload, Nlmsghdr};
 ///
 /// # Arguments
 ///
-/// * `mesh_if` - The name of the BATMAN-adv mesh interface (e.g., `"bat0"`).
+/// * `ifindex` - The mesh interface index.
 ///
 /// # Returns
 ///
 /// Returns a vector of `Gateway` structs representing all gateways the mesh node is aware of,
-/// or a `RobinError` if the information could not be retrieved or parsed.
+/// or a `Error` if the information could not be retrieved or parsed.
 ///
 /// # Example
 ///
@@ -35,58 +35,44 @@ use neli::nl::{NlPayload, Nlmsghdr};
 /// }
 /// # }
 /// ```
-pub async fn get_gateways_list(mesh_if: &str) -> Result<Vec<Gateway>, RobinError> {
+pub async fn get_gateways_list(ifindex: u32) -> Result<Vec<Gateway>, Error> {
     let mut attrs = netlink::GenlAttrBuilder::new();
-    let ifindex = if_nametoindex(mesh_if).await.map_err(|_| {
-        RobinError::Netlink(format!(
-            "Error - interface '{}' is not present or not a batman-adv interface",
-            mesh_if
-        ))
-    })?;
 
     attrs
         .add(
             Attribute::BatadvAttrMeshIfindex,
             AttrValueForSend::U32(ifindex),
         )
-        .map_err(|_| {
-            RobinError::Netlink("Error - could not set mesh interface index".to_string())
-        })?;
+        .map_err(|_| Error::Netlink("Error - could not set mesh interface index".to_string()))?;
 
     let msg = netlink::build_genl_msg(Command::BatadvCmdGetGateways, attrs.build())
-        .map_err(|_| RobinError::Netlink("Error - failed to build netlink message".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to build netlink message".to_string()))?;
 
     let mut socket = netlink::BatadvSocket::connect().await.map_err(|_| {
-        RobinError::Netlink("Error - failed to connect to batman-adv netlink socket".to_string())
+        Error::Netlink("Error - failed to connect to batman-adv netlink socket".to_string())
     })?;
 
     let mut response = socket
         .send(NlmF::REQUEST | NlmF::DUMP, msg)
         .await
-        .map_err(|_| RobinError::Netlink("Error - failed to send netlink request".to_string()))?;
+        .map_err(|_| Error::Netlink("Error - failed to send netlink request".to_string()))?;
 
     let mut gateways = Vec::new();
 
     while let Some(msg) = response.next().await {
-        let msg: Nlmsghdr<u16, Genlmsghdr<u8, u16>> = msg.map_err(|_| {
-            RobinError::Netlink("Error - failed to parse netlink response".to_string())
-        })?;
+        let msg: Nlmsghdr<u16, Genlmsghdr<u8, u16>> = msg
+            .map_err(|_| Error::Netlink("Error - failed to parse netlink response".to_string()))?;
 
         match *msg.nl_type() {
-            x if x == Nlmsg::Done.into() => break,
-            x if x == Nlmsg::Error.into() => {
+            x if x == u16::from(Nlmsg::Done) => break,
+            x if x == u16::from(Nlmsg::Error) => {
                 match &msg.nl_payload() {
                     NlPayload::Err(err) if *err.error() == 0 => break, // end of dump
                     NlPayload::Err(err) => {
-                        return Err(RobinError::Netlink(format!(
-                            "Netlink error {}",
-                            err.error()
-                        )));
+                        return Err(Error::Netlink(format!("Netlink error {}", err.error())));
                     }
                     _ => {
-                        return Err(RobinError::Netlink(
-                            "Unknown netlink error payload".to_string(),
-                        ));
+                        return Err(Error::Netlink("Unknown netlink error payload".to_string()));
                     }
                 }
             }
@@ -95,7 +81,7 @@ pub async fn get_gateways_list(mesh_if: &str) -> Result<Vec<Gateway>, RobinError
 
         let attrs = msg
             .get_payload()
-            .ok_or_else(|| RobinError::Parse("Error - netlink message has no payload".into()))?
+            .ok_or_else(|| Error::Argument("Error - netlink message has no payload".into()))?
             .attrs()
             .get_attr_handle();
 
@@ -105,11 +91,11 @@ pub async fn get_gateways_list(mesh_if: &str) -> Result<Vec<Gateway>, RobinError
 
         let mac_addr = attrs
             .get_attr_payload_as::<[u8; 6]>(Attribute::BatadvAttrOrigAddress.into())
-            .map_err(|_| RobinError::Parse("Error - gateway originator address missing".into()))?;
+            .map_err(|_| Error::Argument("Error - gateway originator address missing".into()))?;
 
         let router = attrs
             .get_attr_payload_as::<[u8; 6]>(Attribute::BatadvAttrRouter.into())
-            .map_err(|_| RobinError::Parse("Error - gateway router address missing".into()))?;
+            .map_err(|_| Error::Argument("Error - gateway router address missing".into()))?;
 
         let outgoing_if =
             match attrs.get_attr_payload_as::<[u8; 16]>(Attribute::BatadvAttrHardIfname.into()) {
@@ -121,10 +107,10 @@ pub async fn get_gateways_list(mesh_if: &str) -> Result<Vec<Gateway>, RobinError
                     let ifindex = attrs
                         .get_attr_payload_as::<u32>(Attribute::BatadvAttrHardIfindex.into())
                         .map_err(|_| {
-                            RobinError::Parse("Error - gateway hard interface index missing".into())
+                            Error::Argument("Error - gateway hard interface index missing".into())
                         })?;
                     if_indextoname(ifindex).await.map_err(|_| {
-                        RobinError::Netlink(
+                        Error::Netlink(
                             "Error - failed to resolve interface name from index".to_string(),
                         )
                     })?

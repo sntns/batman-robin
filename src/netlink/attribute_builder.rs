@@ -1,7 +1,7 @@
 use neli::genl::{AttrTypeBuilder, NlattrBuilder};
 use neli::types::{Buffer, GenlBuffer};
 
-use crate::error::RobinError;
+use crate::error::Error;
 use crate::model::{AttrValueForSend, Attribute};
 
 /// Builder for Generic Netlink attributes.
@@ -34,16 +34,12 @@ impl GenlAttrBuilder {
     ///
     /// # Returns
     /// - `Ok(())` on success.
-    /// - `Err(RobinError)` if building the netlink attribute fails.
-    pub(crate) fn add(
-        &mut self,
-        attr: Attribute,
-        value: AttrValueForSend,
-    ) -> Result<(), RobinError> {
+    /// - `Err(Error)` if building the netlink attribute fails.
+    pub(crate) fn add(&mut self, attr: Attribute, value: AttrValueForSend) -> Result<(), Error> {
         let attr_type = AttrTypeBuilder::default()
             .nla_type(attr.into())
             .build()
-            .map_err(|e| RobinError::Netlink(format!("Failed to build AttrType: {:?}", e)))?;
+            .map_err(|e| Error::Netlink(format!("Failed to build AttrType: {:?}", e)))?;
 
         let attr_payload = match value {
             AttrValueForSend::String(s) => {
@@ -61,7 +57,7 @@ impl GenlAttrBuilder {
             .nla_type(attr_type)
             .nla_payload(attr_payload)
             .build()
-            .map_err(|e| RobinError::Netlink(format!("Failed to build Nlattr: {:?}", e)))?;
+            .map_err(|e| Error::Netlink(format!("Failed to build Nlattr: {:?}", e)))?;
 
         self.buf.push(attr);
         Ok(())

@@ -1,4 +1,4 @@
-use crate::error::RobinError;
+use crate::error::Error;
 use crate::{Attribute, Command, netlink};
 
 use crate::commands::get_algoname_netlink;
@@ -21,12 +21,12 @@ use std::fs;
 ///
 /// # Returns
 ///
-/// A `String` representing the default routing algorithm, or a `RobinError` if reading fails.
-pub async fn get_default_routing_algo() -> Result<String, RobinError> {
+/// A `String` representing the default routing algorithm, or a `Error` if reading fails.
+pub async fn get_default_routing_algo() -> Result<String, Error> {
     let path = "/sys/module/batman_adv/parameters/routing_algo";
 
     let content = fs::read_to_string(path).map_err(|e| {
-        RobinError::Io(format!(
+        Error::Io(format!(
             "Failed to read default routing algo from {}: {}",
             path, e
         ))
@@ -41,25 +41,25 @@ pub async fn get_default_routing_algo() -> Result<String, RobinError> {
 ///
 /// # Returns
 ///
-/// A vector of tuples, or a `RobinError` if querying fails.
+/// A vector of tuples, or a `Error` if querying fails.
 ///
 /// # Notes
 ///
 /// Only interfaces of kind `"batadv"` are included.
-pub async fn get_active_routing_algos() -> Result<Vec<(String, String)>, RobinError> {
+pub async fn get_active_routing_algos() -> Result<Vec<(String, String)>, Error> {
     let (rtnl, _) = NlRouter::connect(NlFamily::Route, None, Groups::empty())
         .await
-        .map_err(|e| RobinError::Netlink(format!("Failed to connect to Netlink: {:?}", e)))?;
+        .map_err(|e| Error::Netlink(format!("Failed to connect to Netlink: {:?}", e)))?;
 
     rtnl.enable_ext_ack(true)
-        .map_err(|e| RobinError::Netlink(format!("Failed to enable extended ACK: {:?}", e)))?;
+        .map_err(|e| Error::Netlink(format!("Failed to enable extended ACK: {:?}", e)))?;
     rtnl.enable_strict_checking(true)
-        .map_err(|e| RobinError::Netlink(format!("Failed to enable strict checking: {:?}", e)))?;
+        .map_err(|e| Error::Netlink(format!("Failed to enable strict checking: {:?}", e)))?;
 
     let msg = IfinfomsgBuilder::default()
         .ifi_family(RtAddrFamily::Unspecified)
         .build()
-        .map_err(|e| RobinError::Netlink(format!("Failed to build Ifinfomsg: {:?}", e)))?;
+        .map_err(|e| Error::Netlink(format!("Failed to build Ifinfomsg: {:?}", e)))?;
 
     let mut response = rtnl
         .send::<_, _, Rtm, Ifinfomsg>(
@@ -68,13 +68,12 @@ pub async fn get_active_routing_algos() -> Result<Vec<(String, String)>, RobinEr
             NlPayload::Payload(msg),
         )
         .await
-        .map_err(|e| RobinError::Netlink(format!("Failed to send GETLINK request: {:?}", e)))?;
+        .map_err(|e| Error::Netlink(format!("Failed to send GETLINK request: {:?}", e)))?;
 
     let mut result = Vec::new();
     while let Some(msg) = response.next().await {
-        let msg: Nlmsghdr<Rtm, Ifinfomsg> = msg.map_err(|e| {
-            RobinError::Netlink(format!("Failed to parse Netlink message: {:?}", e))
-        })?;
+        let msg: Nlmsghdr<Rtm, Ifinfomsg> =
+            msg.map_err(|e| Error::Netlink(format!("Failed to parse Netlink message: {:?}", e)))?;
 
         let payload = match msg.get_payload() {
             Some(p) => p,
@@ -102,7 +101,7 @@ pub async fn get_active_routing_algos() -> Result<Vec<(String, String)>, RobinEr
         }
 
         let algo = get_algoname_netlink(mesh_if.as_str()).await.map_err(|e| {
-            RobinError::Netlink(format!(
+            Error::Netlink(format!(
                 "Failed to get routing algorithm for '{}': {:?}",
                 mesh_if, e
             ))
@@ -120,16 +119,16 @@ pub async fn get_active_routing_algos() -> Result<Vec<(String, String)>, RobinEr
 ///
 /// # Returns
 ///
-/// A vector of algorithm names as `String`s, or a `RobinError` if none are found or the query fails.
-pub async fn get_available_routing_algos() -> Result<Vec<String>, RobinError> {
+/// A vector of algorithm names as `String`s, or a `Error` if none are found or the query fails.
+pub async fn get_available_routing_algos() -> Result<Vec<String>, Error> {
     let msg = netlink::build_genl_msg(
         Command::BatadvCmdGetRoutingAlgos,
         GenlAttrBuilder::new().build(),
     )
-    .map_err(|e| RobinError::Netlink(format!("Failed to build routing algos request: {:?}", e)))?;
+    .map_err(|e| Error::Netlink(format!("Failed to build routing algos request: {:?}", e)))?;
 
     let mut sock = netlink::BatadvSocket::connect().await.map_err(|e| {
-        RobinError::Netlink(format!(
+        Error::Netlink(format!(
             "Failed to connect to batadv netlink socket: {:?}",
             e
         ))
@@ -138,14 +137,12 @@ pub async fn get_available_routing_algos() -> Result<Vec<String>, RobinError> {
     let mut response = sock
         .send(NlmF::REQUEST | NlmF::DUMP, msg)
         .await
-        .map_err(|e| {
-            RobinError::Netlink(format!("Failed to send routing algos request: {:?}", e))
-        })?;
+        .map_err(|e| Error::Netlink(format!("Failed to send routing algos request: {:?}", e)))?;
 
     let mut algos = Vec::new();
     while let Some(msg) = response.next().await {
         let msg: Nlmsghdr<u16, Genlmsghdr<u8, u16>> = msg.map_err(|e| {
-            RobinError::Netlink(format!("Failed to parse routing algos message: {:?}", e))
+            Error::Netlink(format!("Failed to parse routing algos message: {:?}", e))
         })?;
 
         let payload = match msg.get_payload() {
@@ -154,7 +151,7 @@ pub async fn get_available_routing_algos() -> Result<Vec<String>, RobinError> {
         };
 
         for attr in payload.attrs().iter() {
-            if *attr.nla_type().nla_type() == Attribute::BatadvAttrAlgoName.into() {
+            if *attr.nla_type().nla_type() == u16::from(Attribute::BatadvAttrAlgoName) {
                 let bytes = attr.nla_payload().as_ref();
                 let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
                 let algo = String::from_utf8_lossy(&bytes[..nul]).to_string();
@@ -164,9 +161,7 @@ pub async fn get_available_routing_algos() -> Result<Vec<String>, RobinError> {
     }
 
     if algos.is_empty() {
-        return Err(RobinError::NotFound(
-            "No routing algorithms found".to_string(),
-        ));
+        return Err(Error::NotFound("No routing algorithms found".to_string()));
     }
 
     Ok(algos)
@@ -183,12 +178,12 @@ pub async fn get_available_routing_algos() -> Result<Vec<String>, RobinError> {
 ///
 /// # Returns
 ///
-/// Returns `()` on success, or a `RobinError` if writing fails.
-pub async fn set_default_routing_algo(algo: &str) -> Result<(), RobinError> {
+/// Returns `()` on success, or a `Error` if writing fails.
+pub async fn set_default_routing_algo(algo: &str) -> Result<(), Error> {
     let path = "/sys/module/batman_adv/parameters/routing_algo";
 
     fs::write(path, algo).map_err(|e| {
-        RobinError::Io(format!(
+        Error::Io(format!(
             "Failed to set default routing algo to '{}': {}",
             algo, e
         ))

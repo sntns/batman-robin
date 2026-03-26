@@ -1,5 +1,5 @@
-use crate::commands::{if_indextoname, if_nametoindex};
-use crate::error::RobinError;
+use crate::commands::if_indextoname;
+use crate::error::Error;
 use crate::model::{AttrValueForSend, Attribute, Command, Originator};
 use crate::netlink;
 
@@ -19,11 +19,11 @@ use neli::nl::Nlmsghdr;
 ///
 /// # Arguments
 ///
-/// * `mesh_if` - The name of the mesh interface (e.g., `"bat0"`).
+/// * `ifindex` - The mesh interface index.
 ///
 /// # Returns
 ///
-/// Returns a vector of `Originator` structs or a `RobinError` if the query fails.
+/// Returns a vector of `Originator` structs or a `Error` if the query fails.
 ///
 /// # Example
 ///
@@ -40,53 +40,42 @@ use neli::nl::Nlmsghdr;
 /// }
 /// # }
 /// ```
-pub async fn get_originators(mesh_if: &str) -> Result<Vec<Originator>, RobinError> {
+pub async fn get_originators(ifindex: u32) -> Result<Vec<Originator>, Error> {
     let mut attrs = netlink::GenlAttrBuilder::new();
-    let ifindex = if_nametoindex(mesh_if).await.map_err(|_| {
-        RobinError::Netlink(format!(
-            "Error - interface '{}' is not present or not a batman-adv interface",
-            mesh_if
-        ))
-    })?;
 
     attrs
         .add(
             Attribute::BatadvAttrMeshIfindex,
             AttrValueForSend::U32(ifindex),
         )
-        .map_err(|_| RobinError::Netlink("Failed to add MeshIfIndex attribute".to_string()))?;
+        .map_err(|_| Error::Netlink("Failed to add MeshIfIndex attribute".to_string()))?;
 
     let msg = netlink::build_genl_msg(Command::BatadvCmdGetOriginators, attrs.build())
-        .map_err(|_| RobinError::Netlink("Failed to build netlink message".to_string()))?;
+        .map_err(|_| Error::Netlink("Failed to build netlink message".to_string()))?;
 
     let mut socket = netlink::BatadvSocket::connect()
         .await
-        .map_err(|_| RobinError::Netlink("Failed to connect to batman-adv socket".to_string()))?;
+        .map_err(|_| Error::Netlink("Failed to connect to batman-adv socket".to_string()))?;
 
     let mut response = socket
         .send(NlmF::REQUEST | NlmF::DUMP, msg)
         .await
-        .map_err(|_| RobinError::Netlink("Failed to send netlink request".to_string()))?;
+        .map_err(|_| Error::Netlink("Failed to send netlink request".to_string()))?;
 
     let mut originators: Vec<Originator> = Vec::new();
     while let Some(msg) = response.next().await {
         let msg: Nlmsghdr<u16, Genlmsghdr<u8, u16>> =
-            msg.map_err(|_| RobinError::Netlink("Failed to parse netlink message".to_string()))?;
+            msg.map_err(|_| Error::Netlink("Failed to parse netlink message".to_string()))?;
 
         match *msg.nl_type() {
-            x if x == Nlmsg::Done.into() => break,
-            x if x == Nlmsg::Error.into() => match &msg.nl_payload() {
+            x if x == u16::from(Nlmsg::Done) => break,
+            x if x == u16::from(Nlmsg::Error) => match &msg.nl_payload() {
                 NlPayload::Err(err) if *err.error() == 0 => break,
                 NlPayload::Err(err) => {
-                    return Err(RobinError::Netlink(format!(
-                        "Netlink error {}",
-                        err.error()
-                    )));
+                    return Err(Error::Netlink(format!("Netlink error {}", err.error())));
                 }
                 _ => {
-                    return Err(RobinError::Netlink(
-                        "Unknown netlink error payload".to_string(),
-                    ));
+                    return Err(Error::Netlink("Unknown netlink error payload".to_string()));
                 }
             },
             _ => {}
@@ -94,17 +83,17 @@ pub async fn get_originators(mesh_if: &str) -> Result<Vec<Originator>, RobinErro
 
         let attrs = msg
             .get_payload()
-            .ok_or_else(|| RobinError::Parse("Message without payload".into()))?
+            .ok_or_else(|| Error::Argument("Message without payload".into()))?
             .attrs()
             .get_attr_handle();
 
         let orig = attrs
             .get_attr_payload_as::<[u8; 6]>(Attribute::BatadvAttrOrigAddress.into())
-            .map_err(|_| RobinError::Parse("Missing ORIG_ADDRESS".into()))?;
+            .map_err(|_| Error::Argument("Missing ORIG_ADDRESS".into()))?;
 
         let neigh = attrs
             .get_attr_payload_as::<[u8; 6]>(Attribute::BatadvAttrNeighAddress.into())
-            .map_err(|_| RobinError::Parse("Missing NEIGH_ADDRESS".into()))?;
+            .map_err(|_| Error::Argument("Missing NEIGH_ADDRESS".into()))?;
 
         let outgoing_if =
             match attrs.get_attr_payload_as::<[u8; 16]>(Attribute::BatadvAttrHardIfname.into()) {
@@ -115,16 +104,16 @@ pub async fn get_originators(mesh_if: &str) -> Result<Vec<Originator>, RobinErro
                 Err(_) => {
                     let idx = attrs
                         .get_attr_payload_as::<u32>(Attribute::BatadvAttrHardIfindex.into())
-                        .map_err(|_| RobinError::Parse("Missing HARD_IFINDEX".into()))?;
+                        .map_err(|_| Error::Argument("Missing HARD_IFINDEX".into()))?;
                     if_indextoname(idx).await.map_err(|_| {
-                        RobinError::Netlink(format!("Failed to resolve ifindex {} -> name", idx))
+                        Error::Netlink(format!("Failed to resolve ifindex {} -> name", idx))
                     })?
                 }
             };
 
         let last_seen_ms = attrs
             .get_attr_payload_as::<u32>(Attribute::BatadvAttrLastSeenMsecs.into())
-            .map_err(|_| RobinError::Parse("Missing LAST_SEEN_MSECS".into()))?;
+            .map_err(|_| Error::Argument("Missing LAST_SEEN_MSECS".into()))?;
 
         let tq = attrs
             .get_attr_payload_as::<u8>(Attribute::BatadvAttrTq.into())
