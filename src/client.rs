@@ -132,6 +132,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn originators(
         &self,
         selector: model::MeshSelector,
@@ -152,17 +153,23 @@ impl Client {
     ///
     /// # async fn example() -> Result<(), batman_robin::Error> {
     /// let client = Client::new();
-    /// let gateways = client.gateways(MeshSelector::with_name("bat0")).await?;
+    /// let gateways = client.gateways(Some(MeshSelector::with_name("bat0"))).await?;
     /// println!("{} gateways", gateways.len());
+    /// // Pass None to query gateways across all mesh interfaces:
+    /// let all = client.gateways(None).await?;
     /// # Ok(())
     /// # }
     /// ```
     #[tracing::instrument(skip(self))]
     pub async fn gateways(
         &self,
-        selector: model::MeshSelector,
+        selector: Option<model::MeshSelector>,
     ) -> Result<Vec<model::Gateway>, Error> {
-        let ifindex = self.selector_to_ifindex(selector).await?;
+        let ifindex = if let Some(selector) = selector {
+            Some(self.selector_to_ifindex(selector).await?)
+        } else {
+            None
+        };
         commands::get_gateways_list(ifindex).await
     }
 
@@ -180,7 +187,7 @@ impl Client {
     /// # async fn example() -> Result<(), batman_robin::Error> {
     /// let client = Client::new();
     /// let mut events = client
-    ///     .subscribe_gateway_events(MeshSelector::with_name("bat0"))
+    ///     .subscribe_gateway_events(Some(MeshSelector::with_name("bat0")))
     ///     .await?;
     ///
     /// while let Some(event) = events.next().await {
@@ -192,9 +199,13 @@ impl Client {
     #[tracing::instrument(skip(self))]
     pub async fn subscribe_gateway_events(
         &self,
-        selector: model::MeshSelector,
+        selector: Option<model::MeshSelector>,
     ) -> Result<BoxStream<'static, Result<model::GatewayEvent, Error>>, Error> {
-        let ifindex = self.selector_to_ifindex(selector).await?;
+        let ifindex = if let Some(selector) = selector {
+            Some(self.selector_to_ifindex(selector).await?)
+        } else {
+            None
+        };
         commands::UeventListener::subscribe_events(ifindex).await
     }
 
@@ -255,6 +266,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn set_gw_mode(
         &self,
         selector: model::MeshSelector,
@@ -309,6 +321,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn translocal(
         &self,
         selector: model::MeshSelector,
@@ -334,6 +347,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn neighbors(
         &self,
         selector: model::MeshSelector,
@@ -359,6 +373,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn interface_list(
         &self,
         selector: model::MeshSelector,
@@ -420,6 +435,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn interface_remove(
         &self,
         interface_selector: model::InterfaceSelector,
@@ -448,12 +464,44 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn mesh_create(
         &self,
         mesh_if: &str,
         routing_algo: Option<&str>,
     ) -> Result<(), Error> {
-        commands::create_interface(mesh_if, routing_algo).await
+        commands::create_mesh(mesh_if, routing_algo).await
+    }
+
+    /// Lists BATMAN-adv mesh interfaces available on the host.
+    ///
+    /// This method returns interfaces whose kernel link kind is `batadv`.
+    /// It is useful to discover existing mesh interfaces before selecting one
+    /// for operations like neighbors, gateways, or interface management.
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of mesh interface names for every detected
+    /// BATMAN-adv mesh interface.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::Client;
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let meshes = client.mesh_list().await?;
+    ///
+    /// for mesh in meshes {
+    ///     println!("mesh={}", mesh);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(skip(self))]
+    pub async fn mesh_list(&self) -> Result<Vec<String>, Error> {
+        commands::list_meshes().await
     }
 
     /// Destroys a BATMAN-adv mesh interface selected by name or ifindex.
@@ -472,9 +520,10 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn mesh_delete(&self, selector: model::MeshSelector) -> Result<(), Error> {
         let ifindex = self.selector_to_ifindex(selector).await?;
-        commands::destroy_interface(ifindex).await
+        commands::delete_mesh(ifindex).await
     }
 
     /// Counts the number of physical interfaces attached to the selected mesh interface.
@@ -494,6 +543,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn interfaces_count(&self, selector: model::MeshSelector) -> Result<u32, Error> {
         let ifindex = self.selector_to_ifindex(selector).await?;
         commands::count_interfaces(ifindex).await
@@ -516,6 +566,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn get_aggregation(&self, selector: model::MeshSelector) -> Result<bool, Error> {
         let ifindex = self.selector_to_ifindex(selector).await?;
         commands::get_aggregation(ifindex).await
@@ -540,6 +591,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn set_aggregation(
         &self,
         selector: model::MeshSelector,
@@ -568,6 +620,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn get_ap_isolation(&self, selector: model::MeshSelector) -> Result<bool, Error> {
         let ifindex = self.selector_to_ifindex(selector).await?;
         commands::get_ap_isolation(ifindex).await
@@ -592,6 +645,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn set_ap_isolation(
         &self,
         selector: model::MeshSelector,
@@ -620,6 +674,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn get_bridge_loop_avoidance(
         &self,
         selector: model::MeshSelector,
@@ -647,6 +702,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn set_bridge_loop_avoidance(
         &self,
         selector: model::MeshSelector,
@@ -673,6 +729,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn get_default_routing_algo(&self) -> Result<String, Error> {
         commands::get_default_routing_algo().await
     }
@@ -695,6 +752,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn get_active_routing_algos(&self) -> Result<Vec<(String, String)>, Error> {
         commands::get_active_routing_algos().await
     }
@@ -713,6 +771,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn get_available_routing_algos(&self) -> Result<Vec<String>, Error> {
         commands::get_available_routing_algos().await
     }
@@ -733,6 +792,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(skip(self))]
     pub async fn set_default_routing_algo(&self, algo: &str) -> Result<(), Error> {
         commands::set_default_routing_algo(algo).await
     }

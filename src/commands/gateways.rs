@@ -16,7 +16,7 @@ use neli::nl::{NlPayload, Nlmsghdr};
 ///
 /// # Arguments
 ///
-/// * `ifindex` - The mesh interface index.
+/// * `ifindex` - The mesh interface index, or `None` to query gateways across all mesh interfaces.
 ///
 /// # Returns
 ///
@@ -29,21 +29,26 @@ use neli::nl::{NlPayload, Nlmsghdr};
 /// # use batman_robin::model::Gateway;
 /// # async fn example() {
 /// # let gateways: Vec<Gateway> = vec![];
-/// // let gateways = get_gateways_list("bat0").await?;
+/// // let gateways = get_gateways_list(None).await?;      // all interfaces
+/// // let gateways = get_gateways_list(Some(3)).await?;   // specific interface
 /// for gw in gateways {
 ///     println!("Gateway {} via {} (best: {})", gw.mac_addr, gw.outgoing_if, gw.is_best);
 /// }
 /// # }
 /// ```
-pub async fn get_gateways_list(ifindex: u32) -> Result<Vec<Gateway>, Error> {
+pub async fn get_gateways_list(ifindex: Option<u32>) -> Result<Vec<Gateway>, Error> {
     let mut attrs = netlink::GenlAttrBuilder::new();
 
-    attrs
-        .add(
-            Attribute::BatadvAttrMeshIfindex,
-            AttrValueForSend::U32(ifindex),
-        )
-        .map_err(|_| Error::Netlink("Error - could not set mesh interface index".to_string()))?;
+    if let Some(ifindex) = ifindex {
+        attrs
+            .add(
+                Attribute::BatadvAttrMeshIfindex,
+                AttrValueForSend::U32(ifindex),
+            )
+            .map_err(|_| {
+                Error::Netlink("Error - could not set mesh interface index".to_string())
+            })?;
+    }
 
     let msg = netlink::build_genl_msg(Command::BatadvCmdGetGateways, attrs.build())
         .map_err(|_| Error::Netlink("Error - failed to build netlink message".to_string()))?;

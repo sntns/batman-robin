@@ -12,11 +12,8 @@
 //! - BATACTION: "ADD" | "CHANGE" | "DEL"
 //! - BATDATA: MAC address (for ADD/CHANGE)
 
-use crate::commands::utils::if_indextoname;
 use crate::error::Error;
-use crate::gateway_events::GatewayEventService;
 use crate::model::{GatewayEvent, GatewayEventAction};
-use async_trait::async_trait;
 use futures::stream::BoxStream;
 use macaddr::MacAddr;
 use neli::consts::socket::{Msg, NlFamily};
@@ -42,10 +39,8 @@ impl UeventListener {
     /// Subscribe to gateway events via kernel uevents.
     #[tracing::instrument()]
     pub async fn subscribe_events(
-        meshif_index: u32,
+        meshif_index: Option<u32>,
     ) -> Result<BoxStream<'static, Result<GatewayEvent, Error>>, Error> {
-        let meshif_name = if_indextoname(meshif_index).await?;
-
         let socket = NlSocket::connect(
             NlFamily::KobjectUevent,
             None,
@@ -71,10 +66,7 @@ impl UeventListener {
         let (tx, rx) = unbounded_channel();
 
         tokio::spawn(async move {
-            tracing::debug!(
-                "Udev adapter: starting gateway event listener for {}",
-                meshif_name
-            );
+            tracing::debug!("starting uevent listener");
 
             let mut buffer = vec![0u8; UEVENT_BUFFER_SIZE];
 
@@ -105,7 +97,7 @@ impl UeventListener {
                 };
 
                 if bytes == 0 {
-                    tracing::debug!("Uevent socket returned EOF for {}", meshif_name);
+                    tracing::debug!("Uevent socket returned EOF");
                     return;
                 }
 
@@ -126,35 +118,24 @@ impl UeventListener {
                 }
 
                 let matches_interface = properties
-                    .get("INTERFACE")
-                    .map(String::as_str)
-                    .is_some_and(|interface| interface == meshif_name)
-                    || properties
-                        .get("IFINDEX")
-                        .and_then(|ifindex| ifindex.parse::<u32>().ok())
-                        == Some(meshif_index);
+                    .get("IFINDEX")
+                    .map(|s| s.parse::<u32>().ok())
+                    .is_some_and(|interface| meshif_index.is_none() || interface == meshif_index);
 
                 if !matches_interface {
                     continue;
                 }
 
-                let event = match Self::parse_gateway_event(meshif_index, properties) {
+                let event = match Self::parse_gateway_event(properties) {
                     Ok(event) => event,
                     Err(e) => {
-                        tracing::warn!(
-                            "Ignoring invalid gateway uevent for {}: {}",
-                            meshif_name,
-                            e
-                        );
+                        tracing::warn!("Ignoring invalid gateway uevent: {}", e);
                         continue;
                     }
                 };
 
                 if tx.send(Ok(event)).is_err() {
-                    tracing::debug!(
-                        "Gateway event receiver dropped for {}, stopping listener",
-                        meshif_name
-                    );
+                    tracing::debug!("Gateway event receiver dropped, stopping listener");
                     return;
                 }
             }
@@ -185,10 +166,7 @@ impl UeventListener {
     }
 
     /// Convert parsed uevent properties to GatewayEvent.
-    fn parse_gateway_event(
-        meshif_index: u32,
-        props: HashMap<String, String>,
-    ) -> Result<GatewayEvent, Error> {
+    fn parse_gateway_event(props: HashMap<String, String>) -> Result<GatewayEvent, Error> {
         // Verify this is a gateway event
         if props.get("BATTYPE").map(|s| s.as_str()) != Some("gw") {
             return Err(Error::Argument("not a gateway uevent".to_string()));
@@ -211,25 +189,27 @@ impl UeventListener {
             }
         };
 
+        let meshif_name = props
+            .get("INTERFACE")
+            .cloned()
+            .ok_or(Error::Argument("missing INTERFACE".to_string()))?;
+
+        let meshif = props
+            .get("IFINDEX")
+            .map(|s| s.parse::<u32>())
+            .ok_or(Error::Argument("missing IFINDEX".to_string()))?
+            .map_err(|e| Error::Argument(format!("invalid IFINDEX: {}", e)))?;
+
         // Extract gateway MAC (present for ADD/CHANGE, absent for DEL)
         let gateway_mac = props.get("BATDATA").and_then(|s| MacAddr::from_str(s).ok());
 
         Ok(GatewayEvent {
             timestamp: std::time::SystemTime::now(),
-            meshif: meshif_index,
+            meshif,
+            meshif_name,
             action,
             gateway_mac,
         })
-    }
-}
-
-#[async_trait]
-impl GatewayEventService for UeventListener {
-    async fn subscribe_gateway_events(
-        &self,
-        meshif: u32,
-    ) -> Result<BoxStream<'static, Result<GatewayEvent, Error>>, Error> {
-        Self::subscribe_events(meshif).await
     }
 }
 
@@ -254,8 +234,10 @@ mod tests {
         props.insert("BATTYPE".to_string(), "gw".to_string());
         props.insert("BATACTION".to_string(), "ADD".to_string());
         props.insert("BATDATA".to_string(), "60:09:c3:aa:bb:cc".to_string());
+        props.insert("INTERFACE".to_string(), "bat0".to_string());
+        props.insert("IFINDEX".to_string(), "6".to_string());
 
-        let event = UeventListener::parse_gateway_event(6, props).unwrap();
+        let event = UeventListener::parse_gateway_event(props).unwrap();
 
         assert_eq!(event.meshif, 6);
         assert_eq!(event.action, GatewayEventAction::Add);
@@ -267,8 +249,10 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("BATTYPE".to_string(), "gw".to_string());
         props.insert("BATACTION".to_string(), "DEL".to_string());
+        props.insert("INTERFACE".to_string(), "bat0".to_string());
+        props.insert("IFINDEX".to_string(), "6".to_string());
 
-        let event = UeventListener::parse_gateway_event(6, props).unwrap();
+        let event = UeventListener::parse_gateway_event(props).unwrap();
 
         assert_eq!(event.meshif, 6);
         assert_eq!(event.action, GatewayEventAction::Delete);
@@ -280,8 +264,10 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("BATTYPE".to_string(), "gw".to_string());
         props.insert("BATACTION".to_string(), "INVALID".to_string());
+        props.insert("INTERFACE".to_string(), "bat0".to_string());
+        props.insert("IFINDEX".to_string(), "6".to_string());
 
-        let result = UeventListener::parse_gateway_event(6, props);
+        let result = UeventListener::parse_gateway_event(props);
         assert!(result.is_err());
     }
 }

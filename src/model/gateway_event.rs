@@ -31,6 +31,9 @@ pub struct GatewayEvent {
     /// Mesh interface index (e.g. from `if_nametoindex("bat0")`)
     pub meshif: u32,
 
+    /// Mesh interface name (e.g. "bat0")
+    pub meshif_name: String,
+
     /// Type of gateway change event
     pub action: GatewayEventAction,
 
@@ -67,10 +70,16 @@ pub enum GatewayEventAction {
 
 impl GatewayEvent {
     /// Create a new gateway event
-    pub fn new(meshif: u32, action: GatewayEventAction, gateway_mac: Option<MacAddr>) -> Self {
+    pub fn new(
+        meshif: u32,
+        meshif_name: String,
+        action: GatewayEventAction,
+        gateway_mac: Option<MacAddr>,
+    ) -> Self {
         Self {
             timestamp: SystemTime::now(),
             meshif,
+            meshif_name,
             action,
             gateway_mac,
         }
@@ -99,9 +108,10 @@ mod tests {
     #[test]
     fn test_gateway_event_creation() {
         let mac = "60:09:c3:aa:bb:cc".parse().unwrap();
-        let event = GatewayEvent::new(6, GatewayEventAction::Add, Some(mac));
+        let event = GatewayEvent::new(6, "bat0".to_string(), GatewayEventAction::Add, Some(mac));
 
         assert_eq!(event.meshif, 6);
+        assert_eq!(event.meshif_name, "bat0");
         assert_eq!(event.action, GatewayEventAction::Add);
         assert_eq!(event.gateway_mac, Some(mac));
         assert!(event.has_gateway());
@@ -109,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_delete_event_no_gateway() {
-        let event = GatewayEvent::new(6, GatewayEventAction::Delete, None);
+        let event = GatewayEvent::new(6, "bat0".to_string(), GatewayEventAction::Delete, None);
 
         assert_eq!(event.action, GatewayEventAction::Delete);
         assert!(!event.has_gateway());

@@ -1,3 +1,5 @@
+use validator::Validate;
+
 /// Selects a BATMAN-adv mesh interface either by interface name or by ifindex.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct MeshSelector {
@@ -9,11 +11,8 @@ pub struct MeshSelector {
 
 impl MeshSelector {
     /// Creates an empty selector.
-    pub fn new() -> Self {
-        Self {
-            name: None,
-            ifindex: None,
-        }
+    pub fn builder() -> MeshSelectorBuilder {
+        MeshSelectorBuilder::new()
     }
 
     /// Creates a selector from an interface name.
@@ -83,5 +82,33 @@ impl validator::Validate for MeshSelector {
         } else {
             Err(errors)
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MeshSelectorBuilder {
+    selector: MeshSelector,
+}
+
+impl MeshSelectorBuilder {
+    pub fn new() -> Self {
+        Self {
+            selector: MeshSelector::default(),
+        }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.selector.name = Some(name.into());
+        self
+    }
+
+    pub fn with_ifindex(mut self, ifindex: u32) -> Self {
+        self.selector.ifindex = Some(ifindex);
+        self
+    }
+
+    pub fn build(self) -> Result<MeshSelector, validator::ValidationErrors> {
+        self.selector.validate()?;
+        Ok(self.selector)
     }
 }

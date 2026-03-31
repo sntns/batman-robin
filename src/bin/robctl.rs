@@ -52,8 +52,11 @@ async fn main() {
         }
         Some(("gateways", sub_m)) => match sub_m.subcommand() {
             Some(("listen", _)) => {
-                let mut events =
-                    exit_on_error(client.subscribe_gateway_events(mesh_selector.clone()).await);
+                let mut events = exit_on_error(
+                    client
+                        .subscribe_gateway_events(Some(mesh_selector.clone()))
+                        .await,
+                );
                 gateways::print_gateway_event_header(mesh_if);
 
                 while let Some(event) = events.next().await {
@@ -62,7 +65,7 @@ async fn main() {
                 }
             }
             Some(("list", _)) | None => {
-                let entries = exit_on_error(client.gateways(mesh_selector.clone()).await);
+                let entries = exit_on_error(client.gateways(Some(mesh_selector.clone())).await);
                 gateways::print_gwl(&entries, algo_name.as_str());
             }
             _ => unreachable!("unsupported gateways subcommand"),

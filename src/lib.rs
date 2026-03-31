@@ -15,7 +15,6 @@
 mod client;
 mod commands;
 mod error;
-pub mod gateway_events;
 mod netlink;
 
 pub mod cli;
@@ -23,5 +22,4 @@ pub mod model;
 
 pub use client::Client;
 pub use error::Error;
-pub use gateway_events::GatewayEventService;
 pub use model::*;
