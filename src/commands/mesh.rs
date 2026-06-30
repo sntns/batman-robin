@@ -110,7 +110,7 @@ pub async fn create_mesh(
 
     let address_attr = RtattrBuilder::default()
         .rta_type(Ifla::Address)
-        .rta_payload(Buffer::from(hw_addr.as_bytes().as_ref()))
+        .rta_payload(Buffer::from(hw_addr.as_bytes()))
         .build()
         .map_err(|_| Error::Netlink("Error - failed to build ADDRESS attribute".to_string()))?;
 
