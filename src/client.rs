@@ -447,11 +447,13 @@ impl Client {
         commands::set_interface(iface_ifindex, None).await
     }
 
-    /// Creates a new BATMAN-adv mesh interface with an optional routing algorithm.
+    /// Creates a new BATMAN-adv mesh interface with an optional routing algorithm and MAC address.
     ///
     /// # Arguments
     /// * `mesh_if` - Name of the interface to create.
     /// * `routing_algo` - Optional routing algorithm string.
+    /// * `mac_addr` - Optional hardware address. A random locally-administered address is
+    ///   generated if `None` to avoid conflicts with other devices on the network.
     ///
     /// # Example
     ///
@@ -460,7 +462,7 @@ impl Client {
     ///
     /// # async fn example() -> Result<(), batman_robin::Error> {
     /// let client = Client::new();
-    /// client.mesh_create("bat0", Some("BATMAN_V")).await?;
+    /// client.mesh_create("bat0", Some("BATMAN_V"), None).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -469,8 +471,9 @@ impl Client {
         &self,
         mesh_if: &str,
         routing_algo: Option<&str>,
+        mac_addr: Option<macaddr::MacAddr6>,
     ) -> Result<(), Error> {
-        commands::create_mesh(mesh_if, routing_algo).await
+        commands::create_mesh(mesh_if, routing_algo, mac_addr).await
     }
 
     /// Lists BATMAN-adv mesh interfaces available on the host.

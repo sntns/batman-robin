@@ -1,5 +1,6 @@
 use crate::error::Error;
 
+use macaddr::MacAddr6;
 use neli::consts::{
     nl::NlmF,
     rtnl::{Ifla, IflaInfo, RtAddrFamily, Rtm},
@@ -10,15 +11,31 @@ use neli::router::asynchronous::NlRouter;
 use neli::rtnl::{Ifinfomsg, IfinfomsgBuilder, RtattrBuilder};
 use neli::types::{Buffer, RtBuffer};
 use neli::utils::Groups;
+use std::io::Read;
+
+/// Generates a random locally-administered unicast MAC address using `/dev/urandom`.
+fn generate_random_mac() -> Result<MacAddr6, Error> {
+    let mut file = std::fs::File::open("/dev/urandom")
+        .map_err(|e| Error::Netlink(format!("Failed to open /dev/urandom: {e}")))?;
+    let mut bytes = [0u8; 6];
+    file.read_exact(&mut bytes)
+        .map_err(|e| Error::Netlink(format!("Failed to read /dev/urandom: {e}")))?;
+    // Ensure locally administered (bit 1) and unicast (bit 0 clear)
+    bytes[0] = (bytes[0] & 0xFE) | 0x02;
+    Ok(MacAddr6::from(bytes))
+}
 
 /// Creates a new BATMAN-adv mesh interface.
 ///
-/// Optionally, a routing algorithm can be specified. This corresponds to `ip link add type batadv`.
+/// Optionally, a routing algorithm and hardware address can be specified. This corresponds to
+/// `ip link add type batadv`. If no MAC address is provided, a random locally-administered
+/// unicast address is generated to avoid conflicts with other devices on the network.
 ///
 /// # Arguments
 ///
 /// * `mesh_if` - The name of the mesh interface to create.
 /// * `routing_algo` - Optional routing algorithm name (e.g., `"BATMAN_IV"`).
+/// * `mac_addr` - Optional hardware address. A random address is generated if `None`.
 ///
 /// # Returns
 ///
@@ -28,10 +45,14 @@ use neli::utils::Groups;
 ///
 /// ```no_run
 /// # async fn example() {
-/// // create_mesh("bat0", Some("BATMAN_IV")).await?;
+/// // create_mesh("bat0", Some("BATMAN_IV"), None).await?;
 /// # }
 /// ```
-pub async fn create_mesh(mesh_if: &str, routing_algo: Option<&str>) -> Result<(), Error> {
+pub async fn create_mesh(
+    mesh_if: &str,
+    routing_algo: Option<&str>,
+    mac_addr: Option<MacAddr6>,
+) -> Result<(), Error> {
     const IFLA_BATADV_ALGO_NAME: u16 = 1;
     let (rtnl, _) = NlRouter::connect(NlFamily::Route, None, Groups::empty())
         .await
@@ -82,8 +103,20 @@ pub async fn create_mesh(mesh_if: &str, routing_algo: Option<&str>) -> Result<()
         .build()
         .map_err(|_| Error::Netlink("Error - failed to build LINKINFO attribute".to_string()))?;
 
+    let hw_addr = match mac_addr {
+        Some(addr) => addr,
+        None => generate_random_mac()?,
+    };
+
+    let address_attr = RtattrBuilder::default()
+        .rta_type(Ifla::Address)
+        .rta_payload(Buffer::from(hw_addr.as_bytes().as_ref()))
+        .build()
+        .map_err(|_| Error::Netlink("Error - failed to build ADDRESS attribute".to_string()))?;
+
     let mut rtattrs: RtBuffer<Ifla, Buffer> = RtBuffer::new();
     rtattrs.push(ifname_attr);
+    rtattrs.push(address_attr);
     rtattrs.push(linkinfo_attr);
 
     let msg = IfinfomsgBuilder::default()

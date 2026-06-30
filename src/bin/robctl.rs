@@ -6,6 +6,8 @@ use batman_robin::InterfaceSelector;
 use batman_robin::MeshSelector;
 use batman_robin::cli::*;
 use futures::StreamExt;
+use macaddr::MacAddr6;
+use std::str::FromStr;
 
 /// Handle a `Error` in a CLI-friendly way by printing the error and exiting.
 fn exit_on_error<T>(res: Result<T, batman_robin::Error>) -> T {
@@ -145,17 +147,40 @@ async fn main() {
                     return;
                 }
                 "create" | "c" => {
-                    let routing_algo = match params.as_slice() {
-                        [] => None,
-                        ["ra", algo] => Some(*algo),
-                        ["routing_algo", algo] => Some(*algo),
-                        _ => {
-                            eprintln!("Error - invalid parameters for create");
-                            return;
+                    let mut routing_algo: Option<&str> = None;
+                    let mut mac_addr: Option<MacAddr6> = None;
+                    let mut iter = params.as_slice().iter();
+                    while let Some(key) = iter.next() {
+                        match *key {
+                            "ra" | "routing_algo" => {
+                                routing_algo = iter.next().copied();
+                                if routing_algo.is_none() {
+                                    eprintln!("Error - missing value after '{}'", key);
+                                    return;
+                                }
+                            }
+                            "mac" => {
+                                let val = iter.next().copied();
+                                match val.map(MacAddr6::from_str) {
+                                    Some(Ok(addr)) => mac_addr = Some(addr),
+                                    Some(Err(_)) => {
+                                        eprintln!("Error - invalid MAC address after 'mac'");
+                                        return;
+                                    }
+                                    None => {
+                                        eprintln!("Error - missing value after 'mac'");
+                                        return;
+                                    }
+                                }
+                            }
+                            _ => {
+                                eprintln!("Error - unknown parameter '{}' for create", key);
+                                return;
+                            }
                         }
-                    };
+                    }
 
-                    exit_on_error(client.mesh_create(mesh_if, routing_algo).await);
+                    exit_on_error(client.mesh_create(mesh_if, routing_algo, mac_addr).await);
                     return;
                 }
                 "add" | "a" | "del" | "d" => {
