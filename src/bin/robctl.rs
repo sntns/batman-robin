@@ -52,6 +52,14 @@ async fn main() {
             let entries = exit_on_error(client.neighbors(mesh_selector.clone()).await);
             neighbors::print_neighbors(&entries, algo_name.as_str());
         }
+        Some(("links", sub_m)) => {
+            let format = sub_m
+                .get_one::<String>("format")
+                .map(String::as_str)
+                .unwrap_or("table");
+            let entries = exit_on_error(client.links(mesh_selector.clone()).await);
+            links::print_links(&entries, algo_name.as_str(), format);
+        }
         Some(("gateways", sub_m)) => match sub_m.subcommand() {
             Some(("listen", _)) => {
                 let mut events = exit_on_error(

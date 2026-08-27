@@ -4,6 +4,7 @@ use super::bridge_loop_avoidance::cmd_bridge_loop_avoidance;
 use super::gateways::cmd_gateways;
 use super::gw_mode::cmd_gw_mode;
 use super::interface::cmd_interfaces;
+use super::links::cmd_links;
 use super::neighbors::cmd_neighbors;
 use super::originators::cmd_originators;
 use super::routing_algo::cmd_routing_algo;
@@ -22,6 +23,7 @@ use clap::{Arg, Command};
 ///
 /// # Subcommands
 /// - `neighbors` (`n`) : Display the neighbor table.
+/// - `links` (`lk`) : Display the one-hop link-quality table.
 /// - `gateways` (`gwl`) : Display the list of gateways.
 /// - `gw_mode` (`gw`) : Display or modify the gateway mode.
 /// - `originators` (`o`) : Display the originator table.
@@ -63,6 +65,7 @@ pub fn build_cli() -> Command {
                 .action(clap::ArgAction::SetTrue),
         )
         .subcommand(cmd_neighbors())
+        .subcommand(cmd_links())
         .subcommand(cmd_gateways())
         .subcommand(cmd_gw_mode())
         .subcommand(cmd_originators())

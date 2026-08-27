@@ -9,6 +9,7 @@ pub mod bridge_loop_avoidance;
 pub mod gateways;
 pub mod gw_mode;
 pub mod interface;
+pub mod links;
 pub mod neighbors;
 pub mod originators;
 pub mod routing_algo;

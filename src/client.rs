@@ -141,6 +141,29 @@ impl Client {
         commands::get_originators(ifindex).await
     }
 
+    /// Retrieves the one-hop links of the selected mesh interface.
+    ///
+    /// # Arguments
+    /// * `selector` - Mesh selector.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use batman_robin::{Client, MeshSelector};
+    ///
+    /// # async fn example() -> Result<(), batman_robin::Error> {
+    /// let client = Client::new();
+    /// let links = client.links(MeshSelector::with_name("bat0")).await?;
+    /// println!("{} links", links.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(skip(self))]
+    pub async fn links(&self, selector: model::MeshSelector) -> Result<Vec<model::Link>, Error> {
+        let ifindex = self.selector_to_ifindex(selector).await?;
+        commands::get_links(ifindex).await
+    }
+
     /// Retrieves the list of gateways for the selected mesh interface.
     ///
     /// # Arguments

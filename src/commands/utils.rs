@@ -75,6 +75,62 @@ pub async fn get_algoname_netlink(mesh_if: &str) -> Result<String, Error> {
     )))
 }
 
+/// Retrieves the mesh interface's own MAC address (`BATADV_ATTR_MESH_ADDRESS`).
+///
+/// This is the address batman-adv uses to identify this node as an originator
+/// to the rest of the mesh, i.e. the same address space as `BATADV_ATTR_ORIG_ADDRESS`
+/// and `BATADV_ATTR_NEIGH_ADDRESS` reported by other nodes.
+///
+/// # Arguments
+///
+/// * `ifindex` - The mesh interface index.
+///
+/// # Returns
+///
+/// The mesh interface's MAC address, or a `Error` if it cannot be queried.
+pub async fn get_mesh_address(ifindex: u32) -> Result<macaddr::MacAddr6, Error> {
+    let mut attrs = netlink::GenlAttrBuilder::new();
+    attrs
+        .add(
+            Attribute::BatadvAttrMeshIfindex,
+            AttrValueForSend::U32(ifindex),
+        )
+        .map_err(|_| Error::Netlink("Failed to add MeshIfIndex attribute".to_string()))?;
+
+    let msg = netlink::build_genl_msg(Command::BatadvCmdGetMeshInfo, attrs.build())
+        .map_err(|_| Error::Netlink("Failed to build Netlink message".to_string()))?;
+
+    let mut sock = netlink::BatadvSocket::connect().await.map_err(|_| {
+        Error::Netlink("Failed to connect to batman-adv Netlink socket".to_string())
+    })?;
+
+    let mut response = sock
+        .send(NlmF::REQUEST, msg)
+        .await
+        .map_err(|_| Error::Netlink("Failed to send Netlink request".to_string()))?;
+
+    while let Some(msg) = response.next().await {
+        let msg: Nlmsghdr<u16, Genlmsghdr<u8, u16>> =
+            msg.map_err(|_| Error::Netlink("Failed to parse Netlink message".to_string()))?;
+
+        let payload = match msg.get_payload() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let attrs = payload.attrs().get_attr_handle();
+        if let Ok(addr) =
+            attrs.get_attr_payload_as::<[u8; 6]>(Attribute::BatadvAttrMeshAddress.into())
+        {
+            return Ok(macaddr::MacAddr6::from(addr));
+        }
+    }
+
+    Err(Error::NotFound(
+        "No mesh address found for interface".to_string(),
+    ))
+}
+
 /// Converts a network interface name to its corresponding interface index (ifindex).
 ///
 /// This function uses netlink to enumerate all interfaces and find the index
