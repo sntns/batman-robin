@@ -32,6 +32,6 @@ pub struct Originator {
     pub throughput: Option<u32>,
 
     /// Indicates whether this originator is considered the best next-hop router.
-    /// Corresponds to `BATADV_ATTR_ROUTER`.
+    /// Corresponds to `BATADV_ATTR_FLAG_BEST`.
     pub is_best: bool,
 }
